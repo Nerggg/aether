@@ -164,7 +164,7 @@ class CampaignCreator:
                 model=self.llm.model_name,
                 messages=messages,
                 format=CampaignTemplate.model_json_schema(),
-                options={"temperature": 0.0}
+                options={"temperature": 0.85}
             )
             
             raw_json = response["message"]["content"]
@@ -184,12 +184,15 @@ class CampaignCreator:
 
     def _write_assets_to_disk(self, data: CampaignTemplate) -> None:
         campaign_slug = self.slugify(data.campaign_name)
+
+        starting_loc_slug = f"{campaign_slug}_{self.slugify(data.locations[0].name)}"
         
         campaign_metadata = {
             "campaign_name": data.campaign_name,
             "campaign_slug": campaign_slug,
             "primary_threat": data.primary_threat,
             "starting_quest_hook": data.starting_quest_hook,
+            "starting_location": starting_loc_slug,
             "type": "campaign_info"
         }
         campaign_content = (

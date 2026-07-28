@@ -188,7 +188,7 @@ class CharacterCreator:
                 model=self.llm.model_name,
                 messages=messages,
                 format=CharacterTemplate.model_json_schema(),
-                options={"temperature": 0.0}
+                options={"temperature": 0.85}
             )
             
             raw_json = response["message"]["content"]

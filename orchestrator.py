@@ -154,8 +154,6 @@ class GameOrchestrator:
         self.campaign_slug = campaign_slug
         self.state = state  # Options: NARRATIVE_PLAY, COMBAT_PLAY
 
-        self.current_location_slug = "whispering_woods_entry" # Set starting location default
-        
         # Load local wrappers
         self.md_manager = MarkdownManager()
         self.vector_db = VectorDBManager()
@@ -166,6 +164,13 @@ class GameOrchestrator:
         self.dm_agent = DMAgent()
         self.env_agent = EnvironmentAgent()
         self.actor_agent = ActorAgent()
+
+        try:
+            meta, _ = self.md_manager.read_file("campaigns", f"{self.campaign_slug}_info")
+            self.current_location_slug = meta.get("starting_location", f"{self.campaign_slug}_start")
+            print(f"[Orchestrator] Dynamic Start Room resolved: '{self.current_location_slug}'")
+        except Exception:
+            self.current_location_slug = f"{self.campaign_slug}_start"
         
         self.chat_history: List[Dict[str, str]] = []
         
