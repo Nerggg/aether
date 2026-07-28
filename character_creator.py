@@ -8,6 +8,7 @@ import sqlite3
 from md_manager import MarkdownManager
 from llm_manager import LLMController, PromptBuilder
 from db import get_db_connection
+from vector_db_manager import VectorDBManager
 
 ALLOWED_RACES = Literal["Human", "Elf", "Dwarf", "Halfling", "Dragonborn", "Gnome", "Tiefling"]
 ALLOWED_CLASSES = Literal["Fighter", "Rogue", "Wizard", "Cleric", "Paladin", "Ranger", "Bard"]
@@ -61,6 +62,7 @@ class CharacterCreator:
     def __init__(self, campaign_slug: str):
         self.campaign_slug = campaign_slug
         self.md_manager = MarkdownManager()
+        self.vector_db = VectorDBManager() # NEW: Initialize Vector DB
         self.llm = LLMController()
         self.chat_history = []
 
@@ -221,6 +223,8 @@ class CharacterCreator:
             metadata=actor_metadata,
             content=actor_content
         )
+
+        self.vector_db.upsert_markdown_file(category="actors", filename=filename)
 
         initiative_bonus = (data.dexterity - 10) // 2
         

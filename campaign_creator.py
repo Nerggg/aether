@@ -7,6 +7,7 @@ import ollama
 
 from md_manager import MarkdownManager
 from llm_manager import LLMController, PromptBuilder
+from vector_db_manager import VectorDBManager
 
 # =====================================================================
 # 1. Campaign Generation Schemas (Pydantic)
@@ -46,6 +47,7 @@ class CampaignCreator:
     
     def __init__(self):
         self.md_manager = MarkdownManager()
+        self.vector_db = VectorDBManager() # NEW: Initialize Vector DB
         self.llm = LLMController()
         self.chat_history = []
 
@@ -210,6 +212,8 @@ class CampaignCreator:
             content=campaign_content
         )
 
+        self.vector_db.upsert_markdown_file(category="campaigns", filename=campaign_filename)
+
         for loc in data.locations:
             loc_slug = self.slugify(loc.name)
             unique_location_id = f"{campaign_slug}_{loc_slug}"
@@ -229,6 +233,8 @@ class CampaignCreator:
                 metadata=loc_metadata,
                 content=loc_content
             )
+
+            self.vector_db.upsert_markdown_file(category="locations", filename=unique_location_id)
 
         print("\n=======================================================")
         print("          SUCCESS: CAMPAIGN ASSETS GENERATED")

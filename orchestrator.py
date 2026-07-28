@@ -221,10 +221,26 @@ class GameOrchestrator:
             mechanical_status = self.reconciler.reconcile(action_payload)
             print(f"[Engine Output] {mechanical_status}")
 
-        # Targeted RAG (Filtered strictly by active campaign slug!)
-        rag_results = self.vector_db.search(query=user_input, category_filter="locations", limit=2)
-        # Filters locations matching the active campaign slug
-        rag_chunks = [r["document"] for r in rag_results if r["metadata"].get("meta_campaign_slug") == self.campaign_slug]
+        location_results = self.vector_db.search(query=user_input, category_filter="locations", limit=1)
+        rag_chunks = [
+            r["document"] for r in location_results 
+            if r["metadata"].get("meta_campaign_slug") == self.campaign_slug
+        ]
+        
+        # 2. OPTIONAL RULES RAG: Pull D&D rules ONLY if a mechanical action occurs! [2]
+        if action_payload and action_payload.action_type != "none":
+            # Search the rules directory for the exact action or skill check (e.g. 'skill_check stealth')
+            rules_query = f"{action_payload.action_type} {action_payload.value}"
+            rules_results = self.vector_db.search(query=rules_query, category_filter="rules", limit=1)
+            if rules_results:
+                rag_chunks.append(f"DND RULE REFERENCE:\n{rules_results[0]['document']}")
+                print(f"[RAG] Injected D&D Rule Context: {rules_results[0]['metadata']['source_file']}")
+
+        # 3. LORE RAG: Pull 1 chunk of fantasy lore/novel text for atmospheric prose style [2]
+        lore_results = self.vector_db.search(query=user_input, category_filter="lore", limit=1)
+        if lore_results:
+            rag_chunks.append(f"PROSE INSPIRATION (Style like this):\n{lore_results[0]['document']}")
+            print(f"[RAG] Injected Lore Inspiration: {lore_results[0]['metadata']['source_file']}")
         
         # Compile DM Agent narration
         dm_system = self.dm_agent.compile_prompt(

@@ -147,31 +147,122 @@ class VectorDBManager:
 
         return formatted_results
 
+    def index_directory(self, category: str) -> None:
+        """
+        Recursively scans a designated directory on disk for all Markdown (.md) files,
+        parses their YAML headers, splits them by headings, and bulk-indexes them [2].
+        """
+        if category not in self.md_manager.directories:
+            print(f"[Error] Unknown directory category: '{category}'")
+            return
+            
+        dir_path = self.md_manager.directories[category]
+        print(f"\n[Indexer] Recursively scanning directory: '{dir_path.resolve()}'")
+        
+        # Recursively find all Markdown files under this directory tree [2]
+        md_files = list(dir_path.rglob("*.md"))
+        if not md_files:
+            print(f"[Indexer] No Markdown (.md) files found under the '{category}' directory.")
+            return
+            
+        print(f"[Indexer] Found {len(md_files)} files. Initiating bulk parsing...")
+        
+        for file_path in md_files:
+            # Generate a relative path slug to prevent database ID collisions
+            # e.g., 'dnd-5e-srd-markdown/spells/acid-arrow'
+            relative_name = file_path.relative_to(dir_path).as_posix().replace(".md", "")
+            
+            try:
+                # Read raw file
+                with open(file_path, "r", encoding="utf-8") as f:
+                    raw_text = f.read()
+                    
+                # Parse YAML front matter
+                metadata = {}
+                content = raw_text.strip()
+                if raw_text.startswith("---"):
+                    parts = raw_text.split("---", 2)
+                    if len(parts) >= 3:
+                        import yaml
+                        try:
+                            metadata = yaml.safe_load(parts[1]) or {}
+                            content = parts[2].strip()
+                        except Exception:
+                            pass # If YAML is malformed, treat the whole file as text
+                            
+                # Split content into heading chunks
+                chunks = MarkdownSplitter.split_by_headers(content)
+                if not chunks:
+                    continue
+                    
+                documents = []
+                ids = []
+                metadatas = []
+                
+                for idx, chunk in enumerate(chunks):
+                    doc_text = f"Section: {chunk['header']}\n\n{chunk['text']}"
+                    documents.append(doc_text)
+                    
+                    # Generate a unique, deterministic ID for this chunk
+                    chunk_id = f"{category}_{relative_name.replace('/', '_')}_{idx}"
+                    ids.append(chunk_id)
+                    
+                    # Build segment metadata
+                    chunk_metadata = {
+                        "category": category,
+                        "source_file": relative_name,
+                        "section_header": chunk["header"]
+                    }
+                    for key, val in metadata.items():
+                        if isinstance(val, (str, int, float, bool)):
+                            chunk_metadata[f"meta_{key}"] = val
+                        elif isinstance(val, list):
+                            chunk_metadata[f"meta_{key}"] = ", ".join(map(str, val))
+                            
+                    metadatas.append(chunk_metadata)
+                    
+                # Generate embeddings via Ollama and upsert
+                embeddings = self.embedder.get_embeddings(documents)
+                self.collection.upsert(
+                    ids=ids,
+                    embeddings=embeddings,
+                    metadatas=metadatas,
+                    documents=documents
+                )
+                print(f"[Indexer] Successfully indexed: {relative_name} ({len(documents)} chunks)")
+                
+            except Exception as e:
+                print(f"[Indexer Error] Failed to process file '{file_path}': {e}")
+                
+        print(f"[Indexer] Dynamic indexing complete for category: '{category}'.")
+
 if __name__ == "__main__":
     db_mgr = VectorDBManager()
+    db_mgr.index_directory("rules")
+    db_mgr.index_directory("lore")
 
-    print("\n--- Phase 1: Indexing Files ---")
-    db_mgr.upsert_markdown_file("locations", "whispering_woods_entry")
-    db_mgr.upsert_markdown_file("actors", "barnaby_merchant")
+    # print("\n--- Phase 1: Indexing Files ---")
+    # db_mgr.upsert_markdown_file("locations", "whispering_woods_entry")
+    # db_mgr.upsert_markdown_file("actors", "barnaby_merchant")
 
-    print("\n--- Phase 2: Targeted Querying (Locations Only) ---")
-    loc_results = db_mgr.search(
-        query="What does the forest smell like?", 
-        category_filter="locations", 
-        limit=2
-    )
+    # print("\n--- Phase 2: Targeted Querying (Locations Only) ---")
+    # loc_results = db_mgr.search(
+    #     query="What does the forest smell like?", 
+    #     category_filter="locations", 
+    #     limit=2
+    # )
 
-    for idx, r in enumerate(loc_results):
-        print(f"\nResult #{idx+1} (Source: {r['metadata']['source_file']})")
-        print(f"Match: {r['document'].strip()}")
+    # for idx, r in enumerate(loc_results):
+    #     print(f"\nResult #{idx+1} (Source: {r['metadata']['source_file']})")
+    #     print(f"Match: {r['document'].strip()}")
 
-    print("\n--- Phase 3: Targeted Querying (Actors Only) ---")
-    actor_results = db_mgr.search(
-        query="Tell me about the gnome's coat and inventory.", 
-        category_filter="actors", 
-        limit=2
-    )
+    # print("\n--- Phase 3: Targeted Querying (Actors Only) ---")
+    # actor_results = db_mgr.search(
+    #     query="Tell me about the gnome's coat and inventory.", 
+    #     category_filter="actors", 
+    #     limit=2
+    # )
 
-    for idx, r in enumerate(actor_results):
-        print(f"\nResult #{idx+1} (Source: {r['metadata']['source_file']})")
-        print(f"Match: {r['document'].strip()}")
+    # for idx, r in enumerate(actor_results):
+    #     print(f"\nResult #{idx+1} (Source: {r['metadata']['source_file']})")
+    #     print(f"Match: {r['document'].strip()}")
