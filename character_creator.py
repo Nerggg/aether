@@ -108,30 +108,46 @@ class CharacterCreator:
             # Append user input to history so the parser has context
             self.chat_history.append({"role": "user", "content": user_input})
 
-            # 1. CONTEXT-AWARE DETECTOR: Send recent chat history for extraction [2]
-            try:
-                parser_system = "You are a data extraction system. Analyze the recent conversation history and extract the D&D character options into the required JSON schema format."
-                # We compile the system prompt + the last 4 turns of context
-                parser_messages = [{"role": "system", "content": parser_system}] + self.chat_history[-4:]
-                
-                detect_response = ollama.chat(
-                    model=self.llm.model_name,
-                    messages=parser_messages,
-                    format=CharacterChecklistParser.model_json_schema(),
-                    options={"temperature": 0.0}
-                )
-                parsed_traits = CharacterChecklistParser.model_validate_json(detect_response["message"]["content"])
-                
-                # Update checklist
-                if parsed_traits.name: self.checklist["name"] = parsed_traits.name
-                if parsed_traits.race: self.checklist["race"] = parsed_traits.race
-                if parsed_traits.character_class: self.checklist["character_class"] = parsed_traits.character_class
-                
-                print(f"[Checklist Status] Name: {self.checklist['name']} | Race: {self.checklist['race']} | Class: {self.checklist['character_class']}")
-            except Exception as e:
-                pass # Proceed silently with conversation on parsing errors
+            # 1. RUN DETECTOR (Only if we have had at least 3 turns, to allow natural brainstorming) [2]
+            if len(self.chat_history) >= 3:
+                try:
+                    parser_system = """
+                    You are a strict data extraction system. Analyze the recent conversation history and extract the D&D character options into the required JSON schema format.
+                    
+                    CRITICAL EXTRACTION BOUNDS:
+                    - You must ONLY extract options that have been explicitly chosen or agreed upon by the user.
+                    - If a detail (like name, race, or class) has NOT been explicitly decided or mentioned in the text, you MUST return null for that field. 
+                    - NEVER invent, guess, or assume any values. Default to null.
+                    """
+                    
+                    # FEW-SHOT EXAMPLES to prevent early hallucination [2]
+                    few_shot_messages = [
+                        {"role": "system", "content": parser_system},
+                        {"role": "user", "content": "I want to make a Rogue."},
+                        {"role": "assistant", "content": '{"name": null, "race": null, "character_class": "Rogue"}'},
+                        {"role": "user", "content": "Can you give me name ideas?"},
+                        {"role": "assistant", "content": '{"name": null, "race": null, "character_class": "Rogue"}'}
+                    ]
+                    
+                    parser_messages = few_shot_messages + self.chat_history[-4:]
+                    
+                    detect_response = ollama.chat(
+                        model=self.llm.model_name,
+                        messages=parser_messages,
+                        format=CharacterChecklistParser.model_json_schema(),
+                        options={"temperature": 0.0}
+                    )
+                    parsed_traits = CharacterChecklistParser.model_validate_json(detect_response["message"]["content"])
+                    
+                    if parsed_traits.name: self.checklist["name"] = parsed_traits.name
+                    if parsed_traits.race: self.checklist["race"] = parsed_traits.race
+                    if parsed_traits.character_class: self.checklist["character_class"] = parsed_traits.character_class
+                    
+                    print(f"[Checklist Status] Name: {self.checklist['name']} | Race: {self.checklist['race']} | Class: {self.checklist['character_class']}")
+                except Exception:
+                    pass
 
-            # 2. AUTO-CLOSE CHECK: If all properties are successfully extracted, terminate loop [2]
+            # 2. AUTO-CLOSE CHECK: If all properties are filled, break loop! [2]
             if all(self.checklist.values()):
                 print(f"\n[System] All required attributes found: {self.checklist}")
                 print("Compiling character stats... Please wait.")

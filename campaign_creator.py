@@ -82,31 +82,49 @@ class CampaignCreator:
             # Append the latest turn to history so our parser has context
             self.chat_history.append({"role": "user", "content": user_input})
 
-            # 1. CONTEXT-AWARE DETECTOR: Send recent chat history for extraction [2]
-            try:
-                parser_system = "You are a data extraction system. Analyze the recent conversation history and extract the campaign details into the required JSON schema format."
-                # We compile the system prompt + the last 4 turns of context
-                parser_messages = [{"role": "system", "content": parser_system}] + self.chat_history[-4:]
-                
-                detect_response = ollama.chat(
-                    model=self.llm.model_name,
-                    messages=parser_messages,
-                    format=CampaignChecklistParser.model_json_schema(),
-                    options={"temperature": 0.0} # Pure determinism
-                )
-                parsed_traits = CampaignChecklistParser.model_validate_json(detect_response["message"]["content"])
-                
-                # Update our python checklist
-                if parsed_traits.campaign_name: self.checklist["campaign_name"] = parsed_traits.campaign_name
-                if parsed_traits.setting_description: self.checklist["setting_description"] = parsed_traits.setting_description
-                if parsed_traits.primary_threat: self.checklist["primary_threat"] = parsed_traits.primary_threat
-                if parsed_traits.starting_quest_hook: self.checklist["starting_quest_hook"] = parsed_traits.starting_quest_hook
-                
-                print(f"[Checklist Status] Name: {self.checklist['campaign_name']} | Setting: {self.checklist['setting_description']} | Threat: {self.checklist['primary_threat']} | Hook: {self.checklist['starting_quest_hook']}")
-            except Exception as e:
-                pass # Fail silently on extraction errors and proceed
+            # 1. RUN DETECTOR (Only if we have had at least 3 turns, to allow natural brainstorming) [2]
+            if len(self.chat_history) >= 3:
+                try:
+                    parser_system = """
+                    You are a strict data extraction system. Analyze the recent conversation history and extract the campaign details into the required JSON schema format.
+                    
+                    CRITICAL EXTRACTION BOUNDS:
+                    - You must ONLY extract values that have been explicitly chosen, named, or agreed upon by both the user and the DM.
+                    - If a detail (like the campaign name or threat) has NOT been explicitly decided or mentioned in the text, you MUST return null for that field. 
+                    - NEVER invent, guess, or assume any values. Default to null.
+                    """
+                    
+                    # FEW-SHOT EXAMPLES: Teach the 3B model to output null when information is missing [2]
+                    few_shot_messages = [
+                        {"role": "system", "content": parser_system},
+                        {"role": "user", "content": "I want to create a swamp campaign about a witch."},
+                        {"role": "assistant", "content": '{"campaign_name": null, "setting_description": "A dark swamp setting", "primary_threat": "A witch", "starting_quest_hook": null}'},
+                        {"role": "user", "content": "Can you give me some name ideas?"},
+                        {"role": "assistant", "content": '{"campaign_name": null, "setting_description": "A dark swamp setting", "primary_threat": "A witch", "starting_quest_hook": null}'}
+                    ]
+                    
+                    # Append the active recent conversation context to the few-shot examples [2]
+                    parser_messages = few_shot_messages + self.chat_history[-4:]
+                    
+                    detect_response = ollama.chat(
+                        model=self.llm.model_name,
+                        messages=parser_messages,
+                        format=CampaignChecklistParser.model_json_schema(),
+                        options={"temperature": 0.0}
+                    )
+                    parsed_traits = CampaignChecklistParser.model_validate_json(detect_response["message"]["content"])
+                    
+                    # Update checklist
+                    if parsed_traits.campaign_name: self.checklist["campaign_name"] = parsed_traits.campaign_name
+                    if parsed_traits.setting_description: self.checklist["setting_description"] = parsed_traits.setting_description
+                    if parsed_traits.primary_threat: self.checklist["primary_threat"] = parsed_traits.primary_threat
+                    if parsed_traits.starting_quest_hook: self.checklist["starting_quest_hook"] = parsed_traits.starting_quest_hook
+                    
+                    print(f"[Checklist Status] Name: {self.checklist['campaign_name']} | Setting: {self.checklist['setting_description']} | Threat: {self.checklist['primary_threat']} | Hook: {self.checklist['starting_quest_hook']}")
+                except Exception:
+                    pass
 
-            # 2. AUTO-CLOSE CHECK: If all properties are successfully extracted, terminate loop [2]
+            # 2. AUTO-CLOSE CHECK: If all properties are filled, break and compile [2]
             if all(self.checklist.values()):
                 print(f"\n[System] All required campaign elements found: {self.checklist}")
                 print("Processing finalized campaign assets... Please wait.")
@@ -161,22 +179,36 @@ class CampaignCreator:
             chat_history=self.chat_history
         )
         
-        try:
-            response = ollama.chat(
-                model=self.llm.model_name,
-                messages=messages,
-                format=CampaignTemplate.model_json_schema(),
-                options={"temperature": 0.85}
-            )
+        # Self-correcting retry loop (Max 2 attempts) [2]
+        for attempt in range(2):
+            # Attempt 1: Creative (0.85) | Attempt 2: Strict Fallback (0.0) [1.1.5]
+            temp = 0.85 if attempt == 0 else 0.0
             
-            raw_json = response["message"]["content"]
-            campaign_data = CampaignTemplate.model_validate_json(raw_json)
-            
-            self._write_assets_to_disk(campaign_data)
-            
-        except Exception as e:
-            print(f"\nError compiling campaign: {e}")
-            print("Please try again or refine your brainstorming details.")
+            if attempt > 0:
+                print(f"\n[System Warning] Locations array was empty. Retrying compilation with strict temperature (Attempt {attempt + 1})...")
+
+            try:
+                import ollama
+                response = ollama.chat(
+                    model=self.llm.model_name,
+                    messages=messages,
+                    format=CampaignTemplate.model_json_schema(),
+                    options={"temperature": temp}
+                )
+                
+                raw_json = response["message"]["content"]
+                campaign_data = CampaignTemplate.model_validate_json(raw_json)
+                
+                # If we successfully retrieved campaign locations, write them to disk and exit!
+                if campaign_data.locations:
+                    self._write_assets_to_disk(campaign_data)
+                    return # Success, exit the method
+                    
+            except Exception as e:
+                print(f"[Compiler Warning] Attempt {attempt + 1} failed: {e}")
+                
+        # If both attempts failed, only then raise the error
+        print("\n[Error] System failed to compile campaign after multiple attempts. Please refine your details.")
 
     @staticmethod
     def slugify(text: str) -> str:
