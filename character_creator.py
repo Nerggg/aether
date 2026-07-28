@@ -62,11 +62,10 @@ class CharacterCreator:
     def __init__(self, campaign_slug: str):
         self.campaign_slug = campaign_slug
         self.md_manager = MarkdownManager()
-        self.vector_db = VectorDBManager() # NEW: Initialize Vector DB
+        self.vector_db = VectorDBManager()
         self.llm = LLMController()
         self.chat_history = []
 
-        # The state checklist
         self.checklist = {
             "name": None,
             "race": None,
@@ -84,7 +83,6 @@ class CharacterCreator:
         clear_screen = lambda: os.system("cls" if os.name == "nt" else "clear")
         clear_screen()
         
-        # Front-load valid rules at start
         print(DND_RULES_TEXT)
         
         print("\n=======================================================")
@@ -105,10 +103,8 @@ class CharacterCreator:
                 self.generate_and_save_character()
                 break
 
-            # Append user input to history so the parser has context
             self.chat_history.append({"role": "user", "content": user_input})
 
-            # 1. RUN DETECTOR (Only if we have had at least 3 turns, to allow natural brainstorming) [2]
             if len(self.chat_history) >= 3:
                 try:
                     parser_system = """
@@ -120,7 +116,6 @@ class CharacterCreator:
                     - NEVER invent, guess, or assume any values. Default to null.
                     """
                     
-                    # FEW-SHOT EXAMPLES to prevent early hallucination [2]
                     few_shot_messages = [
                         {"role": "system", "content": parser_system},
                         {"role": "user", "content": "I want to make a Rogue."},
@@ -147,14 +142,12 @@ class CharacterCreator:
                 except Exception:
                     pass
 
-            # 2. AUTO-CLOSE CHECK: If all properties are filled, break loop! [2]
             if all(self.checklist.values()):
                 print(f"\n[System] All required attributes found: {self.checklist}")
                 print("Compiling character stats... Please wait.")
                 self.generate_and_save_character()
                 break
 
-            # 3. CONVERSATIONAL STEP (Dynamic State Reflection)
             active_persona = f"""
             You are the Character Creation Guide. Your job is to help the player build a D&D character.
             

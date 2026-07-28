@@ -9,10 +9,6 @@ from md_manager import MarkdownManager
 from llm_manager import LLMController, PromptBuilder
 from vector_db_manager import VectorDBManager
 
-# =====================================================================
-# 1. Campaign Generation Schemas (Pydantic)
-# =====================================================================
-
 class LocationTemplate(BaseModel):
     id: str = Field(..., description="Lowercase slug identifier (e.g., 'crypt_of_shadows', 'ostia_village')")
     name: str = Field(..., description="The clear display name of the location.")
@@ -21,7 +17,6 @@ class LocationTemplate(BaseModel):
 
 
 class CampaignChecklistParser(BaseModel):
-    """Extraction schema to programmatically capture world traits during the conversation."""
     campaign_name: Optional[str] = Field(None, description="The chosen name of the campaign setting if decided, otherwise null.")
     setting_description: Optional[str] = Field(None, description="Brief description of the setting style (e.g. gothic, pirate, swamp) if decided, otherwise null.")
     primary_threat: Optional[str] = Field(None, description="The main villain or threat (e.g. a witch, a dragon) if decided, otherwise null.")
@@ -39,19 +34,14 @@ class CampaignTemplate(BaseModel):
     )
 
 
-# =====================================================================
-# 2. Campaign Creator Engine
-# =====================================================================
-
 class CampaignCreator:
     
     def __init__(self):
         self.md_manager = MarkdownManager()
-        self.vector_db = VectorDBManager() # NEW: Initialize Vector DB
+        self.vector_db = VectorDBManager()
         self.llm = LLMController()
         self.chat_history = []
 
-        # The state checklist
         self.checklist = {
             "campaign_name": None,
             "setting_description": None,
@@ -79,10 +69,8 @@ class CampaignCreator:
                 self.generate_and_save_campaign()
                 break
 
-            # Append the latest turn to history so our parser has context
             self.chat_history.append({"role": "user", "content": user_input})
 
-            # 1. RUN DETECTOR (Only if we have had at least 3 turns, to allow natural brainstorming) [2]
             if len(self.chat_history) >= 3:
                 try:
                     parser_system = """
@@ -94,7 +82,6 @@ class CampaignCreator:
                     - NEVER invent, guess, or assume any values. Default to null.
                     """
                     
-                    # FEW-SHOT EXAMPLES: Teach the 3B model to output null when information is missing [2]
                     few_shot_messages = [
                         {"role": "system", "content": parser_system},
                         {"role": "user", "content": "I want to create a swamp campaign about a witch."},
@@ -103,7 +90,6 @@ class CampaignCreator:
                         {"role": "assistant", "content": '{"campaign_name": null, "setting_description": "A dark swamp setting", "primary_threat": "A witch", "starting_quest_hook": null}'}
                     ]
                     
-                    # Append the active recent conversation context to the few-shot examples [2]
                     parser_messages = few_shot_messages + self.chat_history[-4:]
                     
                     detect_response = ollama.chat(
@@ -114,7 +100,6 @@ class CampaignCreator:
                     )
                     parsed_traits = CampaignChecklistParser.model_validate_json(detect_response["message"]["content"])
                     
-                    # Update checklist
                     if parsed_traits.campaign_name: self.checklist["campaign_name"] = parsed_traits.campaign_name
                     if parsed_traits.setting_description: self.checklist["setting_description"] = parsed_traits.setting_description
                     if parsed_traits.primary_threat: self.checklist["primary_threat"] = parsed_traits.primary_threat
@@ -124,15 +109,12 @@ class CampaignCreator:
                 except Exception:
                     pass
 
-            # 2. AUTO-CLOSE CHECK: If all properties are filled, break and compile [2]
             if all(self.checklist.values()):
                 print(f"\n[System] All required campaign elements found: {self.checklist}")
                 print("Processing finalized campaign assets... Please wait.")
                 self.generate_and_save_campaign()
                 break
 
-            # 3. CONVERSATIONAL STEP (Dynamic State Reflection)
-            # We inject the active checklist status directly into the interviewer prompt
             active_persona = f"""
             You are the World-Building Dungeon Master. Your goal is to guide the player through establishing exactly 4 campaign parameters:
             1. campaign_name
@@ -179,9 +161,7 @@ class CampaignCreator:
             chat_history=self.chat_history
         )
         
-        # Self-correcting retry loop (Max 2 attempts) [2]
         for attempt in range(2):
-            # Attempt 1: Creative (0.85) | Attempt 2: Strict Fallback (0.0) [1.1.5]
             temp = 0.85 if attempt == 0 else 0.0
             
             if attempt > 0:
@@ -199,15 +179,13 @@ class CampaignCreator:
                 raw_json = response["message"]["content"]
                 campaign_data = CampaignTemplate.model_validate_json(raw_json)
                 
-                # If we successfully retrieved campaign locations, write them to disk and exit!
                 if campaign_data.locations:
                     self._write_assets_to_disk(campaign_data)
-                    return # Success, exit the method
+                    return
                     
             except Exception as e:
                 print(f"[Compiler Warning] Attempt {attempt + 1} failed: {e}")
                 
-        # If both attempts failed, only then raise the error
         print("\n[Error] System failed to compile campaign after multiple attempts. Please refine your details.")
 
     @staticmethod

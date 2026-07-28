@@ -60,7 +60,7 @@ class LLMController:
             response = ollama.chat(
                 model=self.model_name,
                 messages=messages,
-                options={"temperature": 0.7} # Slight creativity allowed for narrative
+                options={"temperature": 0.7}
             )
             return response["message"]["content"]
         except Exception as e:
@@ -73,7 +73,7 @@ class LLMController:
                 model=self.model_name,
                 messages=messages,
                 format=GameActionPayload.model_json_schema(),
-                options={"temperature": 0.0} # Absolute determinism for logic
+                options={"temperature": 0.0}
             )
             
             raw_content = response["message"]["content"]

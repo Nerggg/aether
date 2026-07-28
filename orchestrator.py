@@ -5,16 +5,14 @@ import random
 from typing import List, Dict, Any, Tuple, Optional
 import ollama
 
-# Import all our architectural layers
 from md_manager import MarkdownManager
 from vector_db_manager import VectorDBManager
 from llm_manager import LLMController, PromptBuilder, GameActionPayload
-from db import get_db_connection  # dynamic db connection (Approach B)
+from db import get_db_connection
 from agents import DMAgent, EnvironmentAgent, ActorAgent, CombatAction, EnvironmentStateUpdate
 
 
 class TokenManager:
-    """Estimates token sizes and prunes conversation context to keep performance fast."""
     
     @staticmethod
     def estimate_tokens(text: str) -> int:
@@ -32,7 +30,6 @@ class TokenManager:
 
 
 class StateReconciler:
-    """Surgical SQLite operations tied directly to campaign save files (Approach B)."""
     
     def __init__(self, campaign_slug: str):
         self.campaign_slug = campaign_slug
@@ -71,19 +68,16 @@ class StateReconciler:
 
         if action == "skill_check":
             skill_name = str(val).lower().strip()
-            ability = SKILL_MAP.get(skill_name, "dexterity") # Default fallback to dexterity
+            ability = SKILL_MAP.get(skill_name, "dexterity")
 
-            # Fetch target's ability score from SQLite
             query = f"SELECT {ability} FROM characters WHERE id = ? OR name LIKE ?"
             res = self._execute_query(query, (target, f"%{target}%"))
             if not res:
                 return f"SYSTEM REPORT: Target '{target}' not found. Roll failed."
             
             ability_score = res[0][0]
-            # Calculate modifier: floor((ability - 10) / 2)
             modifier = (ability_score - 10) // 2
             
-            # Generate deterministic roll using Python's random library
             d20_roll = random.randint(1, 20)
             total = d20_roll + modifier
 
@@ -145,22 +139,16 @@ class StateReconciler:
         return ""
 
 
-# =====================================================================
-# Main Game Orchestrator (The State Machine)
-# =====================================================================
-
 class GameOrchestrator:
     def __init__(self, campaign_slug: str, state: str = "NARRATIVE_PLAY"):
         self.campaign_slug = campaign_slug
-        self.state = state  # Options: NARRATIVE_PLAY, COMBAT_PLAY
+        self.state = state
 
-        # Load local wrappers
         self.md_manager = MarkdownManager()
         self.vector_db = VectorDBManager()
         self.llm = LLMController()
         self.reconciler = StateReconciler(self.campaign_slug)
         
-        # Load dynamic agent modules (Step 5)
         self.dm_agent = DMAgent()
         self.env_agent = EnvironmentAgent()
         self.actor_agent = ActorAgent()
@@ -174,7 +162,6 @@ class GameOrchestrator:
         
         self.chat_history: List[Dict[str, str]] = []
         
-        # Combat Runtime attributes
         self.combat_queue: List[Dict[str, Any]] = []
         self.current_turn_index = 0
 
@@ -190,16 +177,11 @@ class GameOrchestrator:
 
     @staticmethod
     def dnd_roll(die_size: int, modifier: int = 0) -> int:
-        """Rolls a single D&D die (e.g. d20, d8, d6) and adds a modifier."""
         return random.randint(1, die_size) + modifier
 
-    # =====================================================================
-    # 1. Narrative Mode Loop
-    # =====================================================================
     def process_narrative_turn(self, user_input: str) -> str:
         self.chat_history.append({"role": "user", "content": user_input})
         
-        # Referee Step
         ref_prompt = """
         You are the silent system referee. Analyze the player's last statement and decide if any numerical, 
         stat, or item inventory updates are required.
@@ -227,22 +209,18 @@ class GameOrchestrator:
             if r["metadata"].get("meta_campaign_slug") == self.campaign_slug
         ]
         
-        # 2. OPTIONAL RULES RAG: Pull D&D rules ONLY if a mechanical action occurs! [2]
         if action_payload and action_payload.action_type != "none":
-            # Search the rules directory for the exact action or skill check (e.g. 'skill_check stealth')
             rules_query = f"{action_payload.action_type} {action_payload.value}"
             rules_results = self.vector_db.search(query=rules_query, category_filter="rules", limit=1)
             if rules_results:
                 rag_chunks.append(f"DND RULE REFERENCE:\n{rules_results[0]['document']}")
                 print(f"[RAG] Injected D&D Rule Context: {rules_results[0]['metadata']['source_file']}")
 
-        # 3. LORE RAG: Pull 1 chunk of fantasy lore/novel text for atmospheric prose style [2]
         lore_results = self.vector_db.search(query=user_input, category_filter="lore", limit=1)
         if lore_results:
             rag_chunks.append(f"PROSE INSPIRATION (Style like this):\n{lore_results[0]['document']}")
             print(f"[RAG] Injected Lore Inspiration: {lore_results[0]['metadata']['source_file']}")
         
-        # Compile DM Agent narration
         dm_system = self.dm_agent.compile_prompt(
             location_lore="\n\n".join(rag_chunks),
             system_update=mechanical_status
@@ -254,15 +232,10 @@ class GameOrchestrator:
         self.chat_history = TokenManager.prune_history(self.chat_history)
         return narrative_response
 
-    # =====================================================================
-    # 2. Combat Mode Initializer
-    # =====================================================================
     def initiate_combat(self) -> str:
-        """Transitions game state, rolls initiative, and populates queue in SQLite."""
         self.set_state("COMBAT_PLAY")
         self.chat_history.append({"role": "system", "content": "[COMBAT INITIATED! Enforcing turn order mechanics]"})
         
-        # Clear old combat queues inside this save file
         self._execute_query("DELETE FROM combat_queue;")
         
         query = """
@@ -282,12 +255,10 @@ class GameOrchestrator:
                 "roll": roll
             })
             
-        # Sort descending by roll
         rolled_combatants.sort(key=lambda x: x["roll"], reverse=True)
         self.combat_queue = rolled_combatants
         self.current_turn_index = 0
         
-        # Insert queue into SQLite
         for turn, actor in enumerate(rolled_combatants):
             self._execute_query(
                 "INSERT INTO combat_queue (actor_id, roll_result, turn_order) VALUES (?, ?, ?)",
@@ -305,23 +276,17 @@ class GameOrchestrator:
         self.state = new_state
         print(f"[Orchestrator State] Transitioned to -> {self.state}")
 
-    # =====================================================================
-    # 3. Combat Turn Execution Loop
-    # =====================================================================
     def process_combat_turn(self, player_action_text: Optional[str] = None) -> str:
-        """Processes the turn of the active combatant in the queue."""
         if self.state != "COMBAT_PLAY":
             return "Not currently in combat."
 
         active_actor = self.combat_queue[self.current_turn_index]
         print(f"\n[Turn: {self.current_turn_index + 1}] Active Combatant: {active_actor['name']}")
 
-        # Fetch active actor's fresh full statistics from SQLite
         res = self._execute_query("SELECT * FROM characters WHERE id = ?", (active_actor["id"],))
         stats_keys = ["id", "name", "type", "strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma", "hp", "max_hp", "ac", "initiative_bonus"]
         actor_stats = dict(zip(stats_keys, res[0]))
 
-        # Check if active actor is dead
         if actor_stats["hp"] <= 0:
             print(f"[Combat] {actor_stats['name']} is incapacitated. Skipping turn.")
             self._advance_turn()
@@ -329,20 +294,14 @@ class GameOrchestrator:
 
         mechanical_status = ""
 
-        # -------------------------------------------------------------
-        # BRANCH A: Player Turn (Deterministic Roll Verification)
-        # -------------------------------------------------------------
         if actor_stats["type"] == "player":
             if not player_action_text:
                 return "Awaiting player turn input..."
             
             self.chat_history.append({"role": "user", "content": f"[Combat Turn: {actor_stats['name']}] {player_action_text}"})
             
-            # Simple attack resolution logic (e.g. "I attack the goblin")
-            # We assume a base weapon attack: d20 + Str mod vs. Target AC. Damage is d8 + Str mod.
             str_mod = (actor_stats["strength"] - 10) // 2
             
-            # Find the active combat enemy in the SQLite table
             opponents = self._execute_query("SELECT id, name, ac, hp FROM characters WHERE type = 'enemy' AND hp > 0 LIMIT 1")
             if opponents:
                 opp_id, opp_name, opp_ac, opp_hp = opponents[0]
@@ -361,9 +320,6 @@ class GameOrchestrator:
             else:
                 mechanical_status = "SYSTEM COMBAT UPDATE: No active enemies left in view."
 
-        # -------------------------------------------------------------
-        # BRANCH B: Enemy turn (Autonomous AI + Dynamic Resolution)
-        # -------------------------------------------------------------
         else:
             print(f"[Combat AI] Thinking turn for NPC: {actor_stats['name']}...")
             opponents_desc = "player_warrior (HP: active, AC: 16)"
@@ -381,21 +337,16 @@ class GameOrchestrator:
             except Exception as e:
                 action_payload = CombatAction(target_id="player_warrior", action_type="melee_attack", action_detail="attacks with claw")
 
-            # Resolve the action dynamically based on what the AI actually chose!
             if action_payload.action_type == "flee":
-                # Resolve a flee attempt (e.g., Dex check vs. player static difficulty of 10)
                 flee_roll = self.dnd_roll(20, (actor_stats["dexterity"] - 10) // 2)
                 if flee_roll >= 10:
                     mechanical_status = f"SYSTEM COMBAT UPDATE: {actor_stats['name']} successfully flees from combat, running into the misty woods!"
-                    # Remove from active queue
                     self.combat_queue.pop(self.current_turn_index)
-                    # Adjust turn pointer back by one so we don't skip the next combatant
                     self.current_turn_index = max(0, self.current_turn_index - 1)
                 else:
                     mechanical_status = f"SYSTEM COMBAT UPDATE: {actor_stats['name']} attempts to flee, but player_warrior blocks their escape!"
             
             else:
-                # Default attack resolution if they chose to attack
                 dex_mod = (actor_stats["dexterity"] - 10) // 2
                 player_stats = self._execute_query("SELECT id, name, ac, hp FROM characters WHERE type = 'player' LIMIT 1")[0]
                 p_id, p_name, p_ac, p_hp = player_stats
@@ -411,17 +362,12 @@ class GameOrchestrator:
                 else:
                     mechanical_status = f"SYSTEM COMBAT UPDATE: {actor_stats['name']} misses player with '{action_payload.action_detail}'."
 
-        # -------------------------------------------------------------
-        # NARRATE OUTCOME
-        # -------------------------------------------------------------
         dm_system = self.dm_agent.compile_prompt(location_lore="", system_update=mechanical_status)
         dm_system += f"\nActive Turn: It was {actor_stats['name']}'s turn. Narrate their action: '{mechanical_status}' in descriptive style."
         
-        # FIX: Compile using the pruned mechanical history instead of verbose narratives!
         pruned_history = self._compile_pruned_combat_history()
         base_messages = PromptBuilder.compile_messages(dm_system, [], pruned_history)
         
-        # Trigger DM narration safely
         base_messages.append({
             "role": "user", 
             "content": f"[Referee] The mechanical action resolved as: '{mechanical_status}'. Dungeon Master, please narrate this turn's action in descriptive prose."
@@ -430,7 +376,6 @@ class GameOrchestrator:
         narrative_response = self.llm.generate_narrative(base_messages)
         narrative_response = narrative_response.replace("assistant\n", "").replace("assistant", "").strip()
         
-        # NEW: Store the narration along with the mechanical metadata
         self.chat_history.append({
             "role": "assistant", 
             "content": f"[{actor_stats['name']}'s Turn] {narrative_response}",
@@ -443,11 +388,9 @@ class GameOrchestrator:
         return narrative_response
 
     def _advance_turn(self) -> None:
-        """Loops the turn index to the next active actor."""
         self.current_turn_index = (self.current_turn_index + 1) % len(self.combat_queue)
 
     def _check_combat_end(self) -> None:
-        """Determines if combat termination thresholds have been reached."""
         enemies_alive = self._execute_query("SELECT COUNT(*) FROM characters WHERE type = 'enemy' AND hp > 0")[0][0]
         player_alive = self._execute_query("SELECT hp FROM characters WHERE type = 'player'")[0][0] > 0
         
@@ -461,22 +404,14 @@ class GameOrchestrator:
             self.chat_history.append({"role": "system", "content": "[Combat Ended. The player has died.]"})
 
     def _compile_pruned_combat_history(self) -> List[Dict[str, str]]:
-        """
-        Extracts the last few turns and replaces verbose narrative paragraphs 
-        with the clean, 1-line mechanical outcomes to prevent model memory drift.
-        """
         pruned_history = []
-        # We grab the last 4 conversational turns
         for turn in self.chat_history[-4:]:
-            # If the turn contains our custom mechanical summary metadata,
-            # we swap out the creative prose for the sterile mechanical fact
             if "mechanical_summary" in turn and turn["mechanical_summary"]:
                 pruned_history.append({
                     "role": turn["role"],
                     "content": f"Outcome of turn: {turn['mechanical_summary']}"
                 })
             else:
-                # Keep player inputs and non-narrative turns as is
                 pruned_history.append({
                     "role": turn["role"],
                     "content": turn["content"]
@@ -487,17 +422,14 @@ class GameOrchestrator:
 if __name__ == "__main__":
     campaign = "brindlemark_dragon_spine"
     
-    # 1. Clean up and insert test records in our campaign-specific save-slot DB
     conn = get_db_connection(campaign)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM characters")
     
-    # Insert Player
     cursor.execute("""
     INSERT INTO characters (id, name, type, strength, dexterity, constitution, intelligence, wisdom, charisma, hp, max_hp, ac, initiative_bonus)
     VALUES (1, 'player_warrior', 'player', 16, 12, 14, 10, 12, 10, 20, 20, 16, 1)
     """)
-    # Insert Enemy Goblin
     cursor.execute("""
     INSERT INTO characters (id, name, type, strength, dexterity, constitution, intelligence, wisdom, charisma, hp, max_hp, ac, initiative_bonus)
     VALUES (2, 'Gruk the Rusty', 'enemy', 8, 14, 10, 7, 8, 5, 8, 8, 12, 2)
@@ -505,7 +437,6 @@ if __name__ == "__main__":
     conn.commit()
     conn.close()
 
-    # 2. Start the Engine
     engine = GameOrchestrator(campaign_slug=campaign)
 
     print("\n=======================================================")
@@ -519,12 +450,9 @@ if __name__ == "__main__":
     print("=======================================================")
     engine.initiate_combat()
 
-    # Let's run a full round of combat (2 turns)
-    # Turn 1: Player is highest, we process player's attack
     p_attack = "I draw my broadsword and swing it hard at Gruk the Rusty!"
     turn_1_narrative = engine.process_combat_turn(player_action_text=p_attack)
     print(f"\nDungeon Master Narration:\n{turn_1_narrative}")
 
-    # Turn 2: Gruk's turn (AI processes action and attacks player)
     turn_2_narrative = engine.process_combat_turn()
     print(f"\nDungeon Master Narration:\n{turn_2_narrative}")

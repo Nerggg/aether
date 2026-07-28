@@ -1,11 +1,10 @@
 import sys
 import os
 
-# Import our custom components
 from campaign_creator import CampaignCreator
 from character_creator import CharacterCreator
 from orchestrator import GameOrchestrator
-from db import get_db_connection  # dynamic db connection (Approach B)
+from db import get_db_connection
 
 
 def clear_screen():
@@ -24,14 +23,12 @@ def main():
     
     choice = input("\nSelect (1-3): ").strip()
     
-    # Defaults
     campaign_slug = ""
     
     if choice == "3":
         print("Exiting Aether. Safe travels, adventurer!")
         sys.exit(0)
 
-    # --- Load Game / Continue Campaign (Approach B) ---
     elif choice == "2":
         campaigns_dir = "data/campaigns"
         if not os.path.exists(campaigns_dir) or not os.listdir(campaigns_dir):
@@ -39,7 +36,6 @@ def main():
             input("Press Enter to return...")
             return main()
             
-        # Scan directories and find campaigns
         files = [f.replace("_info.md", "") for f in os.listdir(campaigns_dir) if f.endswith("_info.md")]
         
         print("\n=== AVAILABLE SAVE SLOTS ===")
@@ -55,13 +51,11 @@ def main():
             input("Press Enter to try again...")
             return main()
             
-    # --- New Campaign Creation ---
     else:
         clear_screen()
         campaign_engine = CampaignCreator()
         campaign_engine.run_brainstorm_loop()
         
-        # Scan and pull the newest campaign file
         campaigns_dir = "data/campaigns"
         files = [f for f in os.listdir(campaigns_dir) if f.endswith("_info.md")]
         files.sort(key=lambda x: os.path.getmtime(os.path.join(campaigns_dir, x)), reverse=True)
@@ -69,8 +63,6 @@ def main():
 
     print(f"\n[Master] Loading Save Slot: {campaign_slug}")
     
-    # Now check if a character exists in this campaign's database
-    # If not, automatically redirect them to Character Creator!
     conn = get_db_connection(campaign_slug)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM characters WHERE type = 'player'")
@@ -86,9 +78,6 @@ def main():
 
     input("Press Enter to launch the main game loop...")
 
-    # -------------------------------------------------------------
-    # PHASE 3: The Main Game Loop
-    # -------------------------------------------------------------
     clear_screen()
     game = GameOrchestrator(campaign_slug=campaign_slug, state="NARRATIVE_PLAY")
     
@@ -99,7 +88,6 @@ def main():
     print("Type your actions or dialogue below. To exit, type 'exit'.")
     print("=======================================================\n")
     
-    # Trigger an initial DM narrative introduction
     intro_narration = game.process_narrative_turn(
         "I open my eyes and look at my surroundings, ready to begin the adventure."
     )
@@ -139,7 +127,6 @@ def main():
                 elif command == "/inventory":
                     conn = get_db_connection(campaign_slug)
                     cursor = conn.cursor()
-                    # Query player's inventories and join with items templates
                     cursor.execute("""
                         SELECT i.name, i.weight, inv.quantity, i.description 
                         FROM inventories inv 
@@ -161,14 +148,12 @@ def main():
                     print("\n[System] Unknown slash command. Try '/stats' or '/inventory'.")
                     continue
                 
-            # If the player types "attack" or "combat", let's trigger combat mode!
             if "attack" in player_input.lower() or "combat" in player_input.lower():
-                # Query SQLite to check if there are living enemies physically present in the active room [3]
                 conn = get_db_connection(campaign_slug)
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT COUNT(*) FROM characters WHERE type = 'enemy' AND hp > 0 AND location_id = ?",
-                    (game.current_location_slug,) # Now fully filtered by active room!
+                    (game.current_location_slug,)
                 )
                 enemy_count = cursor.fetchone()[0]
                 conn.close()
@@ -179,11 +164,9 @@ def main():
                     print(f"\nDungeon Master:\n{reply}\n")
                     continue
 
-                # Hostile threats found, proceed with combat initialization [3]
                 print("\n[Engine] Hostilities detected! Transitioning to Combat Mode...")
                 game.initiate_combat()
                 
-                # Run combat loop until ended
                 while game.state == "COMBAT_PLAY":
                     current_actor = game.combat_queue[game.current_turn_index]
                     if current_actor["type"] == "player":
@@ -198,7 +181,6 @@ def main():
                     print(f"\nDungeon Master:\n{combat_reply}\n")
                 continue
 
-            # Standard narrative loop
             reply = game.process_narrative_turn(player_input)
             print(f"\nDungeon Master:\n{reply}\n")
             

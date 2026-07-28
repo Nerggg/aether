@@ -148,10 +148,6 @@ class VectorDBManager:
         return formatted_results
 
     def index_directory(self, category: str) -> None:
-        """
-        Recursively scans a designated directory on disk for all Markdown (.md) files,
-        parses their YAML headers, splits them by headings, and bulk-indexes them [2].
-        """
         if category not in self.md_manager.directories:
             print(f"[Error] Unknown directory category: '{category}'")
             return
@@ -159,7 +155,6 @@ class VectorDBManager:
         dir_path = self.md_manager.directories[category]
         print(f"\n[Indexer] Recursively scanning directory: '{dir_path.resolve()}'")
         
-        # Recursively find all Markdown files under this directory tree [2]
         md_files = list(dir_path.rglob("*.md"))
         if not md_files:
             print(f"[Indexer] No Markdown (.md) files found under the '{category}' directory.")
@@ -168,16 +163,12 @@ class VectorDBManager:
         print(f"[Indexer] Found {len(md_files)} files. Initiating bulk parsing...")
         
         for file_path in md_files:
-            # Generate a relative path slug to prevent database ID collisions
-            # e.g., 'dnd-5e-srd-markdown/spells/acid-arrow'
             relative_name = file_path.relative_to(dir_path).as_posix().replace(".md", "")
             
             try:
-                # Read raw file
                 with open(file_path, "r", encoding="utf-8") as f:
                     raw_text = f.read()
                     
-                # Parse YAML front matter
                 metadata = {}
                 content = raw_text.strip()
                 if raw_text.startswith("---"):
@@ -188,9 +179,8 @@ class VectorDBManager:
                             metadata = yaml.safe_load(parts[1]) or {}
                             content = parts[2].strip()
                         except Exception:
-                            pass # If YAML is malformed, treat the whole file as text
+                            pass
                             
-                # Split content into heading chunks
                 chunks = MarkdownSplitter.split_by_headers(content)
                 if not chunks:
                     continue
@@ -203,11 +193,9 @@ class VectorDBManager:
                     doc_text = f"Section: {chunk['header']}\n\n{chunk['text']}"
                     documents.append(doc_text)
                     
-                    # Generate a unique, deterministic ID for this chunk
                     chunk_id = f"{category}_{relative_name.replace('/', '_')}_{idx}"
                     ids.append(chunk_id)
                     
-                    # Build segment metadata
                     chunk_metadata = {
                         "category": category,
                         "source_file": relative_name,
@@ -221,7 +209,6 @@ class VectorDBManager:
                             
                     metadatas.append(chunk_metadata)
                     
-                # Generate embeddings via Ollama and upsert
                 embeddings = self.embedder.get_embeddings(documents)
                 self.collection.upsert(
                     ids=ids,
