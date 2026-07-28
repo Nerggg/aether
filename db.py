@@ -17,6 +17,7 @@ def get_db_connection(campaign_slug: str, base_dir: str = "data") -> sqlite3.Con
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             type TEXT NOT NULL CHECK(type IN ('player', 'ally', 'enemy', 'merchant')),
+            location_id TEXT NOT NULL DEFAULT 'global', -- NEW: Tracks physical location of characters
             strength INTEGER NOT NULL CHECK(strength >= 1 AND strength <= 30),
             dexterity INTEGER NOT NULL CHECK(dexterity >= 1 AND dexterity <= 30),
             constitution INTEGER NOT NULL CHECK(constitution >= 1 AND constitution <= 30),

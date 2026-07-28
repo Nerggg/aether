@@ -55,9 +55,41 @@ class StateReconciler:
         if action == "none":
             return ""
 
+        SKILL_MAP = {
+            "stealth": "dexterity",
+            "sleight of hand": "dexterity",
+            "athletics": "strength",
+            "history": "intelligence",
+            "arcana": "intelligence",
+            "insight": "wisdom",
+            "perception": "wisdom",
+            "persuasion": "charisma",
+            "intimidation": "charisma"
+        }
+
         print(f"[Reconciler] Action: {action} | Target: {target} | Val: {val}")
 
-        if action == "damage":
+        if action == "skill_check":
+            skill_name = str(val).lower().strip()
+            ability = SKILL_MAP.get(skill_name, "dexterity") # Default fallback to dexterity
+
+            # Fetch target's ability score from SQLite
+            query = f"SELECT {ability} FROM characters WHERE id = ? OR name LIKE ?"
+            res = self._execute_query(query, (target, f"%{target}%"))
+            if not res:
+                return f"SYSTEM REPORT: Target '{target}' not found. Roll failed."
+            
+            ability_score = res[0][0]
+            # Calculate modifier: floor((ability - 10) / 2)
+            modifier = (ability_score - 10) // 2
+            
+            # Generate deterministic roll using Python's random library
+            d20_roll = random.randint(1, 20)
+            total = d20_roll + modifier
+
+            return f"SYSTEM REPORT: {target} attempted a '{skill_name}' check. Rolled {d20_roll} + {modifier} ({ability} mod) = {total}."
+
+        elif action == "damage":
             try:
                 damage_amount = int(val)
                 res = self._execute_query("SELECT hp, max_hp FROM characters WHERE id = ? OR name LIKE ?", (target, f"%{target}%"))
@@ -121,6 +153,8 @@ class GameOrchestrator:
     def __init__(self, campaign_slug: str, state: str = "NARRATIVE_PLAY"):
         self.campaign_slug = campaign_slug
         self.state = state  # Options: NARRATIVE_PLAY, COMBAT_PLAY
+
+        self.current_location_slug = "whispering_woods_entry" # Set starting location default
         
         # Load local wrappers
         self.md_manager = MarkdownManager()
@@ -210,8 +244,12 @@ class GameOrchestrator:
         # Clear old combat queues inside this save file
         self._execute_query("DELETE FROM combat_queue;")
         
-        # Fetch all characters from SQLite
-        combatants = self._execute_query("SELECT id, name, type, dexterity, initiative_bonus FROM characters WHERE hp > 0")
+        query = """
+            SELECT id, name, type, dexterity, initiative_bonus 
+            FROM characters 
+            WHERE hp > 0 AND (location_id = ? OR type = 'player')
+        """
+        combatants = self._execute_query(query, (self.current_location_slug,))
         
         rolled_combatants = []
         for idx, (cid, name, char_type, dex, init_bonus) in enumerate(combatants):

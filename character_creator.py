@@ -2,7 +2,7 @@ import os
 import re
 import ollama
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, Optional
 import sqlite3
 
 from md_manager import MarkdownManager
@@ -34,6 +34,12 @@ Approved Classes & Starting Attributes:
 - **Bard:** Hit Die: d8. Starting HP: 8 + Con modifier. Armor: Light armor.
 """
 
+class CharacterChecklistParser(BaseModel):
+    """Extraction schema to programmatically capture traits during the conversation."""
+    name: Optional[str] = Field(None, description="The chosen name if mentioned, otherwise null.")
+    race: Optional[ALLOWED_RACES] = Field(None, description="The chosen race from the allowed list if mentioned, otherwise null.")
+    character_class: Optional[ALLOWED_CLASSES] = Field(None, description="The chosen class from the allowed list if mentioned, otherwise null.")
+
 
 class CharacterTemplate(BaseModel):
     name: str = Field(..., description="The character's name.")
@@ -57,21 +63,13 @@ class CharacterCreator:
         self.md_manager = MarkdownManager()
         self.llm = LLMController()
         self.chat_history = []
-        
-        self.creator_persona = f"""
-        You are the Character Creation Guide. Your job is to help the player build a D&D character.
-        
-        {DND_RULES_TEXT}
-        
-        CRITICAL BOUNDARY CONSTRAINTS:
-        - You are STRICTLY FORBIDDEN from allowing any Race or Class outside of the approved lists above.
-        - If the user insists on an unlisted or custom option (such as 'Vampire', 'Monk', etc.), you MUST politely reject their request and direct them to choose from the approved list above.
-        - Help them assign ability scores (Strength, Dexterity, Constitution, Intelligence, Wisdom, Charisma). Suggest starting array (15, 14, 13, 12, 10, 8) if needed.
-        - Aid them in calculating starting HP (Class Hit Die + Con modifier) and AC (Base Armor + Dex modifier).
-        - Brainstorm their background.
-        
-        When they are happy with their character, instruct them to type 'complete' to finalize.
-        """
+
+        # The state checklist
+        self.checklist = {
+            "name": None,
+            "race": None,
+            "character_class": None
+        }
 
     @staticmethod
     def slugify(text: str) -> str:
@@ -80,12 +78,20 @@ class CharacterCreator:
         return re.sub(r"[-\s]+", "_", text)
 
     def run_creation_loop(self) -> None:
+        """Runs the interactive console creation loop."""
+        clear_screen = lambda: os.system("cls" if os.name == "nt" else "clear")
+        clear_screen()
+        
+        # Front-load valid rules at start
+        print(DND_RULES_TEXT)
+        
         print("\n=======================================================")
         print("          AETHER: CHARACTER CREATION TERMINAL")
         print("=======================================================")
         print(f"Active Campaign: {self.campaign_slug}")
         print("Introduce your character's name, race, or class to begin!")
-        print("To complete and write the files, type 'complete'.\n")
+        print("Once all traits are decided, the sheet will automatically write.")
+        print("Or you could type 'complete' to save and build the files at any point.\n")
 
         while True:
             user_input = input("\nYou: ").strip()
@@ -93,18 +99,68 @@ class CharacterCreator:
                 continue
                 
             if user_input.lower() == "complete":
-                print("\nCompiling character stats... Please wait.")
+                print("\nProcessing finalized character... Please wait.")
                 self.generate_and_save_character()
                 break
 
+            # Append user input to history so the parser has context
             self.chat_history.append({"role": "user", "content": user_input})
+
+            # 1. CONTEXT-AWARE DETECTOR: Send recent chat history for extraction [2]
+            try:
+                parser_system = "You are a data extraction system. Analyze the recent conversation history and extract the D&D character options into the required JSON schema format."
+                # We compile the system prompt + the last 4 turns of context
+                parser_messages = [{"role": "system", "content": parser_system}] + self.chat_history[-4:]
+                
+                detect_response = ollama.chat(
+                    model=self.llm.model_name,
+                    messages=parser_messages,
+                    format=CharacterChecklistParser.model_json_schema(),
+                    options={"temperature": 0.0}
+                )
+                parsed_traits = CharacterChecklistParser.model_validate_json(detect_response["message"]["content"])
+                
+                # Update checklist
+                if parsed_traits.name: self.checklist["name"] = parsed_traits.name
+                if parsed_traits.race: self.checklist["race"] = parsed_traits.race
+                if parsed_traits.character_class: self.checklist["character_class"] = parsed_traits.character_class
+                
+                print(f"[Checklist Status] Name: {self.checklist['name']} | Race: {self.checklist['race']} | Class: {self.checklist['character_class']}")
+            except Exception as e:
+                pass # Proceed silently with conversation on parsing errors
+
+            # 2. AUTO-CLOSE CHECK: If all properties are successfully extracted, terminate loop [2]
+            if all(self.checklist.values()):
+                print(f"\n[System] All required attributes found: {self.checklist}")
+                print("Compiling character stats... Please wait.")
+                self.generate_and_save_character()
+                break
+
+            # 3. CONVERSATIONAL STEP (Dynamic State Reflection)
+            active_persona = f"""
+            You are the Character Creation Guide. Your job is to help the player build a D&D character.
+            
+            {DND_RULES_TEXT}
+            
+            Here is the current status of the character checklist:
+            - name: {'COMPLETED ({})'.format(self.checklist['name']) if self.checklist['name'] else 'PENDING'}
+            - race: {'COMPLETED ({})'.format(self.checklist['race']) if self.checklist['race'] else 'PENDING'}
+            - character_class: {'COMPLETED ({})'.format(self.checklist['character_class']) if self.checklist['character_class'] else 'PENDING'}
+
+            INSTRUCTIONS:
+            - Focus on asking questions to resolve the PENDING traits. Ask about ONE trait at a time.
+            - If 'name' is PENDING, ask them for their character's name, or offer 2-3 creative suggestions.
+            - If 'race' is PENDING, guide them to select from the approved races list.
+            - If 'character_class' is PENDING, guide them to select from the approved classes list.
+            - CRITICAL BOUNDARY: You are STRICTLY FORBIDDEN from allowing any Race or Class outside of the approved lists. If the user insists on a custom option, you MUST politely reject their request and redirect them to the approved list.
+            - Once Name, Race, and Class are all COMPLETED, use your final turn to describe their starting HP, AC, ability stats, and briefly ask about their background.
+            """
             
             messages = PromptBuilder.compile_messages(
-                system_persona=self.creator_persona,
+                system_persona=active_persona,
                 rag_context_chunks=[],
                 chat_history=self.chat_history
             )
-            
             response = self.llm.generate_narrative(messages)
             print(f"\nGuide: {response}")
             self.chat_history.append({"role": "assistant", "content": response})
