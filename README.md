@@ -74,7 +74,7 @@ Create a virtual environment and install the required libraries:
 ```bash
 python3 -m venv venv
 source venv/bin/activate  # On Windows use: venv\Scripts\activate
-pip install sentence-transformers chromadb ollama pydantic pyyaml
+pip install -r requirements.txt
 ```
 
 ### 3. Clone and Import the D&D Rulebook (optional)

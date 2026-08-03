@@ -9,9 +9,10 @@ from sentence_transformers import SentenceTransformer
 from md_manager import MarkdownManager
 
 class EmbeddingEngine:
-    def __init__(self, model_name: str = "mxbai-embed-large"):
+    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5"):
         self.model_name = model_name
-        print(f"Embedding engine linked to Ollama model: {self.model_name}")
+        self.model = SentenceTransformer(model_name)
+        print(f"In-process embedding engine initialized using model: {self.model_name}")
 
     def get_embeddings(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
         processed_texts = []
@@ -22,14 +23,11 @@ class EmbeddingEngine:
                 processed_texts.append(text)
 
         try:
-            response = ollama.embed(
-                model=self.model_name,
-                input=processed_texts
-            )
-            return response["embeddings"]
+            embeddings = self.model.encode(processed_texts, show_progress_bar=False)
+            return embeddings.tolist()
             
         except Exception as e:
-            print(f"Error calling Ollama embeddings: {e}")
+            print(f"Error during in-process embedding generation: {e}")
             raise e
 
 
