@@ -203,7 +203,9 @@ class GameOrchestrator:
             mechanical_status = self.reconciler.reconcile(action_payload)
             print(f"[Engine Output] {mechanical_status}")
 
-        location_results = self.vector_db.search(query=user_input, category_filter="locations", limit=1)
+        user_vector = self.vector_db.embedder.get_embeddings([user_input])[0]
+
+        location_results = self.vector_db.search(query_vector=user_vector, category_filter="locations", limit=1)
         rag_chunks = [
             r["document"] for r in location_results 
             if r["metadata"].get("meta_campaign_slug") == self.campaign_slug
@@ -216,7 +218,7 @@ class GameOrchestrator:
                 rag_chunks.append(f"DND RULE REFERENCE:\n{rules_results[0]['document']}")
                 print(f"[RAG] Injected D&D Rule Context: {rules_results[0]['metadata']['source_file']}")
 
-        lore_results = self.vector_db.search(query=user_input, category_filter="lore", limit=1)
+        lore_results = self.vector_db.search(query_vector=user_vector, category_filter="lore", limit=1)
         if lore_results:
             rag_chunks.append(f"PROSE INSPIRATION (Style like this):\n{lore_results[0]['document']}")
             print(f"[RAG] Injected Lore Inspiration: {lore_results[0]['metadata']['source_file']}")

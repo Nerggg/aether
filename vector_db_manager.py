@@ -117,8 +117,11 @@ class VectorDBManager:
         )
         print(f"Indexed {len(documents)} chunks from {category}/{filename} into Vector DB.")
 
-    def search(self, query: str, category_filter: Optional[str] = None, limit: int = 3) -> List[Dict[str, Any]]:
-        query_vector = self.embedder.get_embeddings([query])[0]
+    def search(self, query: Optional[str] = None, query_vector: Optional[List[float]] = None, category_filter: Optional[str] = None, limit: int = 3) -> List[Dict[str, Any]]:
+        if query_vector is None:
+            if query is None:
+                raise ValueError("Must provide either 'query' or 'query_vector'.")
+            query_vector = self.embedder.get_embeddings([query])[0]
         
         where_filter = {}
         if category_filter:
