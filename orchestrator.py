@@ -1,8 +1,8 @@
-
 import sqlite3
 import os
 import random
 from typing import List, Dict, Any, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor
 import ollama
 
 from md_manager import MarkdownManager
@@ -196,21 +196,34 @@ class GameOrchestrator:
         """
         ref_context = [f"Active character ID: 'player_warrior'", f"Action: '{user_input}'"]
         ref_msg = PromptBuilder.compile_messages(ref_prompt, ref_context, [{"role": "user", "content": user_input}])
-        action_payload = self.llm.generate_structured_action(ref_msg)
+
+        # Concurrency Helper: Encapsulates embedding creation and initial RAG queries
+        def fetch_base_rag_context() -> Tuple[List[float], List[Dict[str, Any]], List[Dict[str, Any]]]:
+            vector = self.vector_db.embedder.get_embeddings([user_input])[0]
+            loc_results = self.vector_db.search(query_vector=vector, category_filter="locations", limit=1)
+            lore_results = self.vector_db.search(query_vector=vector, category_filter="lore", limit=1)
+            return vector, loc_results, lore_results
+
+        # Parallel Execution: Run Referee LLM generation and Base RAG searches concurrently
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_referee = executor.submit(self.llm.generate_structured_action, ref_msg)
+            future_rag = executor.submit(fetch_base_rag_context)
+
+            # Block and capture both results once ready
+            action_payload = future_referee.result()
+            user_vector, location_results, lore_results = future_rag.result()
         
         mechanical_status = ""
         if action_payload and action_payload.action_type != "none":
             mechanical_status = self.reconciler.reconcile(action_payload)
             print(f"[Engine Output] {mechanical_status}")
 
-        user_vector = self.vector_db.embedder.get_embeddings([user_input])[0]
-
-        location_results = self.vector_db.search(query_vector=user_vector, category_filter="locations", limit=1)
         rag_chunks = [
             r["document"] for r in location_results 
             if r["metadata"].get("meta_campaign_slug") == self.campaign_slug
         ]
         
+        # Sequentially resolve rules only if a mechanical action was resolved
         if action_payload and action_payload.action_type != "none":
             rules_query = f"{action_payload.action_type} {action_payload.value}"
             rules_results = self.vector_db.search(query=rules_query, category_filter="rules", limit=1)
@@ -218,7 +231,6 @@ class GameOrchestrator:
                 rag_chunks.append(f"DND RULE REFERENCE:\n{rules_results[0]['document']}")
                 print(f"[RAG] Injected D&D Rule Context: {rules_results[0]['metadata']['source_file']}")
 
-        lore_results = self.vector_db.search(query_vector=user_vector, category_filter="lore", limit=1)
         if lore_results:
             rag_chunks.append(f"PROSE INSPIRATION (Style like this):\n{lore_results[0]['document']}")
             print(f"[RAG] Injected Lore Inspiration: {lore_results[0]['metadata']['source_file']}")
