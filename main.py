@@ -88,10 +88,12 @@ def main():
     print("Type your actions or dialogue below. To exit, type 'exit'.")
     print("=======================================================\n")
     
-    intro_narration = game.process_narrative_turn(
+    print("\nDungeon Master:")
+    for chunk in game.process_narrative_turn(
         "I open my eyes and look at my surroundings, ready to begin the adventure."
-    )
-    print(f"\nDungeon Master:\n{intro_narration}\n")
+    ):
+        print(chunk, end="", flush=True)
+    print("\n")
 
     while True:
         try:
@@ -160,8 +162,10 @@ def main():
 
                 if enemy_count == 0:
                     print(f"\n[Engine] No hostile threats detected in '{game.current_location_slug}'. Resolving action as narrative...")
-                    reply = game.process_narrative_turn(player_input)
-                    print(f"\nDungeon Master:\n{reply}\n")
+                    print("\nDungeon Master:")
+                    for chunk in game.process_narrative_turn(player_input):
+                        print(chunk, end="", flush=True)
+                    print("\n")
                     continue
 
                 print("\n[Engine] Hostilities detected! Transitioning to Combat Mode...")
@@ -181,8 +185,10 @@ def main():
                     print(f"\nDungeon Master:\n{combat_reply}\n")
                 continue
 
-            reply = game.process_narrative_turn(player_input)
-            print(f"\nDungeon Master:\n{reply}\n")
+            print("\nDungeon Master:")
+            for chunk in game.process_narrative_turn(player_input):
+                print(chunk, end="", flush=True)
+            print("\n")
             
         except KeyboardInterrupt:
             print("\nGame interrupted. Progress saved in save slot directory. Exiting.")

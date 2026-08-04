@@ -179,7 +179,7 @@ class GameOrchestrator:
     def dnd_roll(die_size: int, modifier: int = 0) -> int:
         return random.randint(1, die_size) + modifier
 
-    def process_narrative_turn(self, user_input: str) -> str:
+    def process_narrative_turn(self, user_input: str):
         self.chat_history.append({"role": "user", "content": user_input})
         
         ref_prompt = """
@@ -197,19 +197,16 @@ class GameOrchestrator:
         ref_context = [f"Active character ID: 'player_warrior'", f"Action: '{user_input}'"]
         ref_msg = PromptBuilder.compile_messages(ref_prompt, ref_context, [{"role": "user", "content": user_input}])
 
-        # Concurrency Helper: Encapsulates embedding creation and initial RAG queries
         def fetch_base_rag_context() -> Tuple[List[float], List[Dict[str, Any]], List[Dict[str, Any]]]:
             vector = self.vector_db.embedder.get_embeddings([user_input])[0]
             loc_results = self.vector_db.search(query_vector=vector, category_filter="locations", limit=1)
             lore_results = self.vector_db.search(query_vector=vector, category_filter="lore", limit=1)
             return vector, loc_results, lore_results
 
-        # Parallel Execution: Run Referee LLM generation and Base RAG searches concurrently
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_referee = executor.submit(self.llm.generate_structured_action, ref_msg)
             future_rag = executor.submit(fetch_base_rag_context)
 
-            # Block and capture both results once ready
             action_payload = future_referee.result()
             user_vector, location_results, lore_results = future_rag.result()
         
@@ -223,7 +220,6 @@ class GameOrchestrator:
             if r["metadata"].get("meta_campaign_slug") == self.campaign_slug
         ]
         
-        # Sequentially resolve rules only if a mechanical action was resolved
         if action_payload and action_payload.action_type != "none":
             rules_query = f"{action_payload.action_type} {action_payload.value}"
             rules_results = self.vector_db.search(query=rules_query, category_filter="rules", limit=1)
@@ -240,11 +236,15 @@ class GameOrchestrator:
             system_update=mechanical_status
         )
         dm_messages = PromptBuilder.compile_messages(dm_system, [], self.chat_history)
-        narrative_response = self.llm.generate_narrative(dm_messages)
         
+        full_response_chunks = []
+        for chunk in self.llm.generate_narrative_stream(dm_messages):
+            full_response_chunks.append(chunk)
+            yield chunk
+            
+        narrative_response = "".join(full_response_chunks)
         self.chat_history.append({"role": "assistant", "content": narrative_response})
         self.chat_history = TokenManager.prune_history(self.chat_history)
-        return narrative_response
 
     def initiate_combat(self) -> str:
         self.set_state("COMBAT_PLAY")

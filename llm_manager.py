@@ -67,6 +67,20 @@ class LLMController:
             print(f"Error during narrative generation: {e}")
             return "The shadows whisper, but the words are lost..."
 
+    def generate_narrative_stream(self, messages: List[Dict[str, str]]):
+        try:
+            response = ollama.chat(
+                model=self.model_name,
+                messages=messages,
+                options={"temperature": 0.7},
+                stream=True
+            )
+            for chunk in response:
+                yield chunk["message"]["content"]
+        except Exception as e:
+            print(f"Error during streaming narrative generation: {e}")
+            yield "The shadows whisper, but the words are lost..."
+
     def generate_structured_action(self, messages: List[Dict[str, str]]) -> Optional[GameActionPayload]:
         try:
             response = ollama.chat(
