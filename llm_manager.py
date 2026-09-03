@@ -22,6 +22,76 @@ class GameActionPayload(BaseModel):
         description="A very brief reasoning for why this action was taken."
     )
 
+class CampaignBlueprint(BaseModel):
+    campaign_name: str = Field(
+        ..., 
+        description="The finalized official name of the setting."
+    )
+    setting_description: str = Field(
+        ..., 
+        description="Atmospheric summary of the world environment, themes, and climate."
+    )
+    primary_threat: str = Field(
+        ..., 
+        description="The primary antagonistic force, faction, or threat."
+    )
+    starting_quest_hook: str = Field(
+        ..., 
+        description="The initial opening call to adventure presented to the player."
+    )
+    theme_vibe: str = Field(
+        ..., 
+        description="The derived stylistic sub-genre or tone tag (e.g., 'Gothic Dark Fantasy', 'High-Seas Exploration')."
+    )
+    starting_patron: str = Field(
+        ..., 
+        description="A friendly helper, local faction, or base of operations that anchors the beginning of the story."
+    )
+
+
+class StorylineBlueprint(BaseModel):
+    beginning: str = Field(
+        ..., 
+        description="The opening scene, initial hook details, and local context."
+    )
+    middle: str = Field(
+        ..., 
+        description="A list of 2-3 major complications, milestones, or obstacles that occur during the journey."
+    )
+    end: str = Field(
+        ..., 
+        description="The final scenario outline, the climax, or confrontation setup."
+    )
+    victory_condition: str = Field(
+        ..., 
+        description="The hidden, precise mechanical criteria required to complete the campaign successfully (e.g., 'Slay the Swamp Witch')."
+    )
+
+
+class LocationBlueprint(BaseModel):
+    id: str = Field(
+        ..., 
+        description="Unique, lowercase snake_case identifier slug (e.g., 'village_tavern', 'misty_bog_path')."
+    )
+    name: str = Field(
+        ..., 
+        description="The clear, human-readable display name of the location."
+    )
+    brief_concept: str = Field(
+        ..., 
+        description="A concise 1-2 sentence core concept defining the location's purpose (used later for JIT generation)."
+    )
+    connections: List[str] = Field(
+        ..., 
+        description="A list of location IDs that directly connect and are adjacent to this node."
+    )
+
+
+class WorldMapBlueprint(BaseModel):
+    locations: List[LocationBlueprint] = Field(
+        ..., 
+        description="A dynamically sized array of location nodes representing the connected campaign map."
+    )
 
 class PromptBuilder:
     
