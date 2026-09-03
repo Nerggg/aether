@@ -1,5 +1,6 @@
 import json
 import ollama
+import random
 from pydantic import BaseModel, Field, ValidationError
 from typing import List, Dict, Any, Optional, Literal, Union
 
@@ -51,28 +52,39 @@ class PromptBuilder:
 
 class LLMController:
     
-    def __init__(self, model_name: str = "llama3.2"):
+    def __init__(self, model_name: str = "llama3.2", referee_model: str = "qwen2.5-coder:3b"):
         self.model_name = model_name
-        print(f"LLM Controller initialized using model: {self.model_name}")
+        self.referee_model = referee_model
+        print(f"LLM Controller initialized. DM: {self.model_name} | Referee: {self.referee_model}")
 
-    def generate_narrative(self, messages: List[Dict[str, str]]) -> str:
+    def generate_narrative(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.7, seed: Optional[int] = None) -> str:
+        target_model = model if model else self.model_name
+        options = {"temperature": temperature}
+        if seed is not None:
+            options["seed"] = seed
+            
         try:
             response = ollama.chat(
-                model=self.model_name,
+                model=target_model,
                 messages=messages,
-                options={"temperature": 0.7}
+                options=options
             )
             return response["message"]["content"]
         except Exception as e:
             print(f"Error during narrative generation: {e}")
             return "The shadows whisper, but the words are lost..."
 
-    def generate_narrative_stream(self, messages: List[Dict[str, str]]):
+    def generate_narrative_stream(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.7, seed: Optional[int] = None):
+        target_model = model if model else self.model_name
+        options = {"temperature": temperature}
+        if seed is not None:
+            options["seed"] = seed
+            
         try:
             response = ollama.chat(
-                model=self.model_name,
+                model=target_model,
                 messages=messages,
-                options={"temperature": 0.7},
+                options=options,
                 stream=True
             )
             for chunk in response:
@@ -81,17 +93,21 @@ class LLMController:
             print(f"Error during streaming narrative generation: {e}")
             yield "The shadows whisper, but the words are lost..."
 
-    def generate_structured_action(self, messages: List[Dict[str, str]]) -> Optional[GameActionPayload]:
+    def generate_structured_action(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.0, seed: Optional[int] = None) -> Optional[GameActionPayload]:
+        target_model = model if model else self.referee_model
+        options = {"temperature": temperature}
+        if seed is not None:
+            options["seed"] = seed
+            
         try:
             response = ollama.chat(
-                model=self.model_name,
+                model=target_model,
                 messages=messages,
                 format=GameActionPayload.model_json_schema(),
-                options={"temperature": 0.0}
+                options=options
             )
             
             raw_content = response["message"]["content"]
-            
             validated_payload = GameActionPayload.model_validate_json(raw_content)
             return validated_payload
             
