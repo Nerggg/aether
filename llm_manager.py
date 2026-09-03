@@ -163,7 +163,15 @@ class LLMController:
             print(f"Error during streaming narrative generation: {e}")
             yield "The shadows whisper, but the words are lost..."
 
-    def generate_structured_action(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.0, seed: Optional[int] = None) -> Optional[GameActionPayload]:
+    def generate_structured_action(
+        self, 
+        messages: List[Dict[str, str]], 
+        response_schema = GameActionPayload, 
+        model: Optional[str] = None, 
+        temperature: float = 0.0, 
+        seed: Optional[int] = None
+    ) -> Any:
+
         target_model = model if model else self.referee_model
         options = {"temperature": temperature}
         if seed is not None:
@@ -173,12 +181,12 @@ class LLMController:
             response = ollama.chat(
                 model=target_model,
                 messages=messages,
-                format=GameActionPayload.model_json_schema(),
+                format=response_schema.model_json_schema(),
                 options=options
             )
             
             raw_content = response["message"]["content"]
-            validated_payload = GameActionPayload.model_validate_json(raw_content)
+            validated_payload = response_schema.model_validate_json(raw_content)
             return validated_payload
             
         except ValidationError as val_err:
