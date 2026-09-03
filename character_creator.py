@@ -1,9 +1,9 @@
 import os
 import re
+import sqlite3
 import ollama
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
-import sqlite3
 
 from md_manager import MarkdownManager
 from llm_manager import LLMController, PromptBuilder
@@ -25,36 +25,30 @@ Approved Races:
 - **Gnome:** +2 Intelligence. Speed: 25ft. Magic resistance saves.
 - **Tiefling:** +2 Charisma, +1 Intelligence. Fire resistance.
 
-Approved Classes & Starting Attributes:
-- **Fighter:** Hit Die: d10. Starting HP: 10 + Con modifier. Armor: All armor, shields.
-- **Rogue:** Hit Die: d8. Starting HP: 8 + Con modifier. Armor: Light armor.
-- **Wizard:** Hit Die: d6. Starting HP: 6 + Con modifier. Armor: None.
-- **Cleric:** Hit Die: d8. Starting HP: 8 + Con modifier. Armor: Medium armor, shields.
-- **Paladin:** Hit Die: d10. Starting HP: 10 + Con modifier. Armor: All armor, shields.
-- **Ranger:** Hit Die: d10. Starting HP: 10 + Con modifier. Armor: Medium armor, shields.
-- **Bard:** Hit Die: d8. Starting HP: 8 + Con modifier. Armor: Light armor.
+Approved Classes:
+- **Fighter:** Hit Die: d10. Armor: Heavy (Chain Mail).
+- **Rogue:** Hit Die: d8. Armor: Light (Leather).
+- **Wizard:** Hit Die: d6. Armor: None.
+- **Cleric:** Hit Die: d8. Armor: Medium (Scale Mail).
+- **Paladin:** Hit Die: d10. Armor: Heavy (Chain Mail).
+- **Ranger:** Hit Die: d10. Armor: Medium (Scale Mail).
+- **Bard:** Hit Die: d8. Armor: Light (Leather).
 """
 
+
 class CharacterChecklistParser(BaseModel):
-    """Extraction schema to programmatically capture traits during the conversation."""
-    name: Optional[str] = Field(None, description="The chosen name if mentioned, otherwise null.")
+    """Extraction schema to capture player options during conversation."""
+    name: Optional[str] = Field(None, description="The chosen character name if mentioned, otherwise null.")
     race: Optional[ALLOWED_RACES] = Field(None, description="The chosen race from the allowed list if mentioned, otherwise null.")
     character_class: Optional[ALLOWED_CLASSES] = Field(None, description="The chosen class from the allowed list if mentioned, otherwise null.")
 
 
-class CharacterTemplate(BaseModel):
-    name: str = Field(..., description="The character's name.")
-    race: ALLOWED_RACES = Field(..., description="Enforces selection from approved races only.")
-    character_class: ALLOWED_CLASSES = Field(..., description="Enforces selection from approved classes only.")
-    strength: int = Field(..., ge=3, le=20)
-    dexterity: int = Field(..., ge=3, le=20)
-    constitution: int = Field(..., ge=3, le=20)
-    intelligence: int = Field(..., ge=3, le=20)
-    wisdom: int = Field(..., ge=3, le=20)
-    charisma: int = Field(..., ge=3, le=20)
-    hp: int = Field(..., description="Level 1 HP (Hit Die + Constitution modifier).", ge=1)
-    ac: int = Field(..., description="Armor Class (Base Armor + Dex modifier).", ge=1)
-    background_lore: str = Field(..., description="Backstory linking character to campaign setting.")
+class CompiledCharacterPayload(BaseModel):
+    """Schema to compile the final backstory and clean character inputs."""
+    name: str = Field(..., description="The finalized character name.")
+    race: ALLOWED_RACES = Field(..., description="Must be selected strictly from the approved races list.")
+    character_class: ALLOWED_CLASSES = Field(..., description="Must be selected strictly from the approved classes list.")
+    background_lore: str = Field(..., description="A rich backstory linking the character to the active campaign.")
 
 
 class CharacterCreator:
@@ -80,18 +74,13 @@ class CharacterCreator:
 
     def run_creation_loop(self) -> None:
         """Runs the interactive console creation loop."""
-        clear_screen = lambda: os.system("cls" if os.name == "nt" else "clear")
-        clear_screen()
-        
         print(DND_RULES_TEXT)
-        
         print("\n=======================================================")
         print("          AETHER: CHARACTER CREATION TERMINAL")
         print("=======================================================")
         print(f"Active Campaign: {self.campaign_slug}")
-        print("Introduce your character's name, race, or class to begin!")
-        print("Once all traits are decided, the sheet will automatically write.")
-        print("Or you could type 'complete' to save and build the files at any point.\n")
+        print("Introduce your character's name, race, and class to begin!")
+        print("Once all parameters are decided, the sheet will automatically write.\n")
 
         while True:
             user_input = input("\nYou: ").strip()
@@ -105,51 +94,39 @@ class CharacterCreator:
 
             self.chat_history.append({"role": "user", "content": user_input})
 
-            if len(self.chat_history) >= 3:
+            if len(self.chat_history) >= 2:
                 try:
                     parser_system = """
                     You are a strict data extraction system. Analyze the recent conversation history and extract the D&D character options into the required JSON schema format.
-                    
-                    CRITICAL EXTRACTION BOUNDS:
-                    - You must ONLY extract options that have been explicitly chosen or agreed upon by the user.
-                    - If a detail (like name, race, or class) has NOT been explicitly decided or mentioned in the text, you MUST return null for that field. 
-                    - NEVER invent, guess, or assume any values. Default to null.
+                    Only extract choices explicitly decided by the user. Default to null for missing fields. Do not invent details.
                     """
+                    parser_messages = [
+                        {"role": "system", "content": parser_system}
+                    ] + self.chat_history[-4:]
                     
-                    few_shot_messages = [
-                        {"role": "system", "content": parser_system},
-                        {"role": "user", "content": "I want to make a Rogue."},
-                        {"role": "assistant", "content": '{"name": null, "race": null, "character_class": "Rogue"}'},
-                        {"role": "user", "content": "Can you give me name ideas?"},
-                        {"role": "assistant", "content": '{"name": null, "race": null, "character_class": "Rogue"}'}
-                    ]
-                    
-                    parser_messages = few_shot_messages + self.chat_history[-4:]
-                    
-                    detect_response = ollama.chat(
-                        model=self.llm.model_name,
+                    parsed_response = self.llm.generate_structured_action(
                         messages=parser_messages,
-                        format=CharacterChecklistParser.model_json_schema(),
-                        options={"temperature": 0.0}
+                        response_schema=CharacterChecklistParser,
+                        model=self.llm.referee_model,
+                        temperature=0.0
                     )
-                    parsed_traits = CharacterChecklistParser.model_validate_json(detect_response["message"]["content"])
                     
-                    if parsed_traits.name: self.checklist["name"] = parsed_traits.name
-                    if parsed_traits.race: self.checklist["race"] = parsed_traits.race
-                    if parsed_traits.character_class: self.checklist["character_class"] = parsed_traits.character_class
-                    
-                    print(f"[Checklist Status] Name: {self.checklist['name']} | Race: {self.checklist['race']} | Class: {self.checklist['character_class']}")
-                except Exception:
-                    pass
+                    if parsed_response:
+                        if parsed_response.name: self.checklist["name"] = parsed_response.name
+                        if parsed_response.race: self.checklist["race"] = parsed_response.race
+                        if parsed_response.character_class: self.checklist["character_class"] = parsed_response.character_class
+                        
+                    print(f"[Checklist Status] Name: {'OK' if self.checklist['name'] else 'PENDING'} | Race: {'OK' if self.checklist['race'] else 'PENDING'} | Class: {'OK' if self.checklist['character_class'] else 'PENDING'}")
+                except Exception as e:
+                    print(f"[Debug] Parsing warning: {e}")
 
             if all(self.checklist.values()):
-                print(f"\n[System] All required attributes found: {self.checklist}")
-                print("Compiling character stats... Please wait.")
+                print(f"\n[System] All core traits established: {self.checklist}")
                 self.generate_and_save_character()
                 break
 
             active_persona = f"""
-            You are the Character Creation Guide. Your job is to help the player build a D&D character.
+            You are the Character Creation Guide. Help the player build a D&D character.
             
             {DND_RULES_TEXT}
             
@@ -159,12 +136,9 @@ class CharacterCreator:
             - character_class: {'COMPLETED ({})'.format(self.checklist['character_class']) if self.checklist['character_class'] else 'PENDING'}
 
             INSTRUCTIONS:
-            - Focus on asking questions to resolve the PENDING traits. Ask about ONE trait at a time.
-            - If 'name' is PENDING, ask them for their character's name, or offer 2-3 creative suggestions.
-            - If 'race' is PENDING, guide them to select from the approved races list.
-            - If 'character_class' is PENDING, guide them to select from the approved classes list.
-            - CRITICAL BOUNDARY: You are STRICTLY FORBIDDEN from allowing any Race or Class outside of the approved lists. If the user insists on a custom option, you MUST politely reject their request and redirect them to the approved list.
-            - Once Name, Race, and Class are all COMPLETED, use your final turn to describe their starting HP, AC, ability stats, and briefly ask about their background.
+            - Focus on PENDING parameters. Ask about ONE parameter at a time.
+            - You must ALWAYS present your questions as a multiple-choice selection labeled A, B, and C containing creative suggestions, with option D reserved for 'Something else / Player's custom input'.
+            - Keep your introductory text highly concise (under 50 words) and speak in a highly collaborative, creative, and immersive world-building tone.
             """
             
             messages = PromptBuilder.compile_messages(
@@ -172,23 +146,76 @@ class CharacterCreator:
                 rag_context_chunks=[],
                 chat_history=self.chat_history
             )
-            response = self.llm.generate_narrative(messages)
+            response = self.llm.generate_narrative(messages, model=self.llm.model_name, temperature=0.7)
             print(f"\nGuide: {response}")
             self.chat_history.append({"role": "assistant", "content": response})
 
+    def _calculate_character_stats(self, race: str, char_class: str):
+        """Pure Python D&D 5e Mechanics Engine."""
+        stat_priorities = {
+            "Fighter": ["strength", "constitution", "dexterity", "wisdom", "charisma", "intelligence"],
+            "Rogue": ["dexterity", "intelligence", "charisma", "constitution", "wisdom", "strength"],
+            "Wizard": ["intelligence", "dexterity", "constitution", "wisdom", "charisma", "strength"],
+            "Cleric": ["wisdom", "constitution", "strength", "intelligence", "dexterity", "charisma"],
+            "Paladin": ["strength", "charisma", "constitution", "wisdom", "dexterity", "intelligence"],
+            "Ranger": ["dexterity", "wisdom", "constitution", "strength", "intelligence", "charisma"],
+            "Bard": ["charisma", "dexterity", "constitution", "wisdom", "intelligence", "strength"]
+        }
+        
+        standard_array = [15, 14, 13, 12, 10, 8]
+        priority = stat_priorities.get(char_class, ["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"])
+        
+        stats = {priority[i]: standard_array[i] for i in range(6)}
+        
+        racial_mods = {
+            "Human": {"strength": 1, "dexterity": 1, "constitution": 1, "intelligence": 1, "wisdom": 1, "charisma": 1},
+            "Elf": {"dexterity": 2},
+            "Dwarf": {"constitution": 2},
+            "Halfling": {"dexterity": 2},
+            "Dragonborn": {"strength": 2, "charisma": 1},
+            "Gnome": {"intelligence": 2},
+            "Tiefling": {"charisma": 2, "intelligence": 1}
+        }
+        
+        mods = racial_mods.get(race, {})
+        for stat, bonus in mods.items():
+            stats[stat] += bonus
+            
+        def get_mod(score):
+            return (score - 10) // 2
+            
+        dex_mod = get_mod(stats["dexterity"])
+        con_mod = get_mod(stats["constitution"])
+        
+        hit_dies = {
+            "Fighter": 10, "Paladin": 10, "Ranger": 10,
+            "Rogue": 8, "Cleric": 8, "Bard": 8,
+            "Wizard": 6
+        }
+        hp = hit_dies.get(char_class, 8) + con_mod
+        
+        if char_class in ["Fighter", "Paladin"]:
+            ac = 16 
+        elif char_class in ["Rogue", "Bard"]:
+            ac = 11 + dex_mod
+        elif char_class in ["Cleric", "Ranger"]:
+            ac = 14 + min(2, dex_mod)
+        else:
+            ac = 10 + dex_mod
+            
+        return stats, hp, ac
+
     def generate_and_save_character(self) -> None:
+        print("\n[1/3] Compiling finalized character sheet and background narrative...")
+        
         compiler_prompt = f"""
-        You are the System parser. Analyze the character creation history and translate 
-        the chosen options into the required JSON schema format.
-        
-        {DND_RULES_TEXT}
-        
-        CRITICAL EXCLUSION:
-        - If the user attempted to bypass rules, you must override their selection and map 
-          their class and race strictly to the closest match in the approved list.
+        Analyze the character creation history and translate the chosen options into the required CompiledCharacterPayload JSON.
+        Make sure you select the race and class strictly from the approved lists:
+        Races: {", ".join(ALLOWED_RACES.__args__)}
+        Classes: {", ".join(ALLOWED_CLASSES.__args__)}
         """
         
-        messages = PromptBuilder.compile_messages(
+        compiled_messages = PromptBuilder.compile_messages(
             system_persona=compiler_prompt,
             rag_context_chunks=[],
             chat_history=self.chat_history
@@ -196,22 +223,25 @@ class CharacterCreator:
         
         try:
             response = ollama.chat(
-                model=self.llm.model_name,
-                messages=messages,
-                format=CharacterTemplate.model_json_schema(),
-                options={"temperature": 0.85}
+                model=self.llm.referee_model,
+                messages=compiled_messages,
+                format=CompiledCharacterPayload.model_json_schema(),
+                options={"temperature": 0.5}
             )
-            
             raw_json = response["message"]["content"]
-            character_data = CharacterTemplate.model_validate_json(raw_json)
+            character_data = CompiledCharacterPayload.model_validate_json(raw_json)
             
-            self._save_to_database_and_disk(character_data)
+            print("[2/3] Executing deterministic math operations for D&D statistics...")
+            stats, hp, ac = self._calculate_character_stats(character_data.race, character_data.character_class)
+            
+            print("[3/3] Saving compiled character profile to disk and database...")
+            self._save_to_database_and_disk(character_data, stats, hp, ac)
             
         except Exception as e:
-            print(f"\nError compiling character: {e}")
-            print("Please try again or refine your character details.")
+            print(f"\n[Error] Character sheet compilation failed: {e}")
+            print("Please run creation again or refine details.")
 
-    def _save_to_database_and_disk(self, data: CharacterTemplate) -> None:
+    def _save_to_database_and_disk(self, data: CompiledCharacterPayload, stats: dict, hp: int, ac: int) -> None:
         char_slug = self.slugify(data.name)
         
         actor_metadata = {
@@ -223,7 +253,18 @@ class CharacterCreator:
             "type": "player",
             "status": "alive"
         }
-        actor_content = f"# {data.name}\n\n**Race:** {data.race} | **Class:** {data.character_class}\n\n## Background & Personality\n{data.background_lore}"
+        
+        actor_content = (
+            f"# Character Sheet: {data.name}\n\n"
+            f"**Race:** {data.race} | **Class:** {data.character_class}\n\n"
+            f"## Backstory & Background Lore\n{data.background_lore}\n\n"
+            f"## Determined Stats (Standard Array + Racial)\n"
+            f"- STR: {stats['strength']} | DEX: {stats['dexterity']} | CON: {stats['constitution']}\n"
+            f"- INT: {stats['intelligence']} | WIS: {stats['wisdom']} | CHA: {stats['charisma']}\n\n"
+            f"## Combat Values\n"
+            f"- **HP:** {hp}/{hp}\n"
+            f"- **AC:** {ac}\n"
+        )
         
         filename = f"{self.campaign_slug}_{char_slug}"
         self.md_manager.write_file(
@@ -235,7 +276,7 @@ class CharacterCreator:
 
         self.vector_db.upsert_markdown_file(category="actors", filename=filename)
 
-        initiative_bonus = (data.dexterity - 10) // 2
+        initiative_bonus = (stats["dexterity"] - 10) // 2
         
         conn = get_db_connection(self.campaign_slug)
         cursor = conn.cursor()
@@ -245,24 +286,26 @@ class CharacterCreator:
             VALUES (?, 'player', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data.name, 
-                data.strength, data.dexterity, data.constitution, 
-                data.intelligence, data.wisdom, data.charisma,
-                data.hp, data.hp, data.ac, initiative_bonus
+                stats["strength"], stats["dexterity"], stats["constitution"], 
+                stats["intelligence"], stats["wisdom"], stats["charisma"],
+                hp, hp, ac, initiative_bonus
             ))
             conn.commit()
             
             print("\n=======================================================")
             print("          SUCCESS: CHARACTER REGISTERED")
             print("=======================================================")
-            print(f"Database Updated: data/campaigns/{self.campaign_slug}/game.db")
-            print(f"Profile Created:  data/actors/{filename}.md")
+            print(f"SQLite Profile Path: data/campaigns/{self.campaign_slug}/game.db")
+            print(f"Markdown Sheet Path: data/actors/{filename}.md")
+            print(f"Calculated Stats:    HP: {hp} | AC: {ac} | DEX-Mod: {initiative_bonus}")
             print("=======================================================\n")
             
         except sqlite3.Error as e:
-            print(f"An error occurred while writing to SQLite: {e}")
+            print(f"[Error] SQLite insertion failed during character registration: {e}")
         finally:
             conn.close()
 
+
 if __name__ == "__main__":
-    creator = CharacterCreator(campaign_slug="your_generated_campaign_slug_here")
+    creator = CharacterCreator(campaign_slug="whispers_of_the_ancient_dark")
     creator.run_creation_loop()
