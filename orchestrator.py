@@ -182,45 +182,44 @@ class GameOrchestrator:
     def process_narrative_turn(self, user_input: str):
         self.chat_history.append({"role": "user", "content": user_input})
         
-        ref_prompt = """
-        You are the silent system referee. Analyze the player's last statement and decide if any numerical, 
-        stat, or item inventory updates are required.
-        Choose from these exact actions: 'damage', 'heal', 'add_item', 'remove_item', 'skill_check', 'none'.
+        self._ensure_location_generated(self.current_location_slug)
         
-        CRITICAL CLASSIFICATION RULE:
-        - Only classify an action as 'damage' or 'heal' if there is an explicit threat, attack, damage-dealing hazard, or consumption of a healing resource (like a potion).
-        - NEVER classify standard environmental investigation, physical touching of scenery, or hand-waving as a spell or healing action.
-        - If a player touches, inspects, or tests a physical object, classify it as 'skill_check' or 'none'.
-        
-        Output strictly in the required JSON schema format.
-        """
-        ref_context = [f"Active character ID: 'player_warrior'", f"Action: '{user_input}'"]
-        ref_msg = PromptBuilder.compile_messages(ref_prompt, ref_context, [{"role": "user", "content": user_input}])
-
-        def fetch_base_rag_context() -> Tuple[List[float], List[Dict[str, Any]], List[Dict[str, Any]]]:
-            vector = self.vector_db.embedder.get_embeddings([user_input])[0]
-            loc_results = self.vector_db.search(query_vector=vector, category_filter="locations", limit=1)
-            lore_results = self.vector_db.search(query_vector=vector, category_filter="lore", limit=1)
-            return vector, loc_results, lore_results
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_referee = executor.submit(self.llm.generate_structured_action, ref_msg)
-            future_rag = executor.submit(fetch_base_rag_context)
-
-            action_payload = future_referee.result()
-            user_vector, location_results, lore_results = future_rag.result()
+        movement_status = self._detect_and_handle_movement(user_input)
         
         mechanical_status = ""
-        if action_payload and action_payload.action_type != "none":
-            mechanical_status = self.reconciler.reconcile(action_payload)
-            print(f"[Engine Output] {mechanical_status}")
+        if movement_status:
+            mechanical_status = movement_status
+        else:
+            ref_prompt = """
+            You are the silent system referee. Analyze the player's last statement and decide if any numerical, 
+            stat, or item inventory updates are required.
+            Choose from these exact actions: 'damage', 'heal', 'add_item', 'remove_item', 'skill_check', 'none'.
+            Output strictly in the required JSON schema format.
+            """
+            ref_context = [f"Active character ID: 'player_warrior'", f"Action: '{user_input}'"]
+            ref_msg = PromptBuilder.compile_messages(ref_prompt, ref_context, [{"role": "user", "content": user_input}])
+            
+            action_payload = self.llm.generate_structured_action(
+                messages=ref_msg,
+                response_schema=GameActionPayload,
+                model=self.llm.referee_model,
+                temperature=0.0
+            )
+            
+            if action_payload and action_payload.action_type != "none":
+                mechanical_status = self.reconciler.reconcile(action_payload)
+                print(f"[Engine Output] {mechanical_status}")
+
+        vector = self.vector_db.embedder.get_embeddings([f"{self.current_location_slug} {user_input}"])[0]
+        location_results = self.vector_db.search(query_vector=vector, category_filter="locations", limit=1)
+        lore_results = self.vector_db.search(query_vector=vector, category_filter="lore", limit=1)
 
         rag_chunks = [
             r["document"] for r in location_results 
             if r["metadata"].get("meta_campaign_slug") == self.campaign_slug
         ]
         
-        if action_payload and action_payload.action_type != "none":
+        if not movement_status and action_payload and action_payload.action_type != "none":
             rules_query = f"{action_payload.action_type} {action_payload.value}"
             rules_results = self.vector_db.search(query=rules_query, category_filter="rules", limit=1)
             if rules_results:
@@ -228,8 +227,7 @@ class GameOrchestrator:
                 print(f"[RAG] Injected D&D Rule Context: {rules_results[0]['metadata']['source_file']}")
 
         if lore_results:
-            rag_chunks.append(f"PROSE INSPIRATION (Style like this):\n{lore_results[0]['document']}")
-            print(f"[RAG] Injected Lore Inspiration: {lore_results[0]['metadata']['source_file']}")
+            rag_chunks.append(f"PROSE INSPIRATION:\n{lore_results[0]['document']}")
         
         dm_system = self.dm_agent.compile_prompt(
             location_lore="\n\n".join(rag_chunks),
@@ -432,6 +430,114 @@ class GameOrchestrator:
                     
                 })
         return pruned_history
+
+    def _get_connected_locations(self) -> List[Dict[str, str]]:
+        """Queries SQLite to fetch all connected nodes adjacent to the current location."""
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, name, brief_concept 
+            FROM locations 
+            WHERE id IN (
+                SELECT to_location_id FROM location_connections WHERE from_location_id = ?
+                UNION
+                SELECT from_location_id FROM location_connections WHERE to_location_id = ?
+            )
+        """, (self.current_location_slug, self.current_location_slug))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"id": r[0], "name": r[1], "concept": r[2]} for r in rows]
+
+    def _ensure_location_generated(self, location_id: str) -> None:
+        """Verifies if a location's description exists. If is_generated is 0, executes JIT creation."""
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, brief_concept, is_generated FROM locations WHERE id = ?", (location_id,))
+        res = cursor.fetchone()
+        
+        if not res:
+            conn.close()
+            return
+            
+        name, brief_concept, is_generated = res
+        
+        if is_generated == 0:
+            print(f"\n[JIT Generator] Executing Just-In-Time generation for: '{name}' ({location_id})...")
+            
+            cursor.execute("SELECT theme_vibe FROM campaign_metadata LIMIT 1")
+            vibe_res = cursor.fetchone()
+            vibe = vibe_res[0] if vibe_res else "Heroic Fantasy"
+            conn.close()
+            
+            jit_prompt = f"""
+            You are a master of sensory fantasy descriptions.
+            Generate a detailed, immersive, sensory-rich (sounds, smells, weather, lighting) description for a location called '{name}'.
+            
+            Core Concept: {brief_concept}
+            Stylistic Theme: {vibe}
+            
+            INSTRUCTIONS:
+            - Write in active, chronological, second-person style ('You see...', 'The air smells of...').
+            - Keep the description between 100-150 words.
+            - Focus only on describing physical atmosphere. Do not write dialogue or start encounters.
+            """
+            
+            full_description = self.llm.generate_narrative(
+                messages=[{"role": "system", "content": jit_prompt}],
+                model=self.llm.model_name,
+                temperature=0.7
+            )
+            
+            loc_metadata = {
+                "id": location_id,
+                "campaign_slug": self.campaign_slug,
+                "name": name,
+                "type": "location_description"
+            }
+            loc_content = f"# {name}\n\n{full_description.strip()}"
+            
+            self.md_manager.write_file(
+                category="locations",
+                filename=location_id,
+                metadata=loc_metadata,
+                content=loc_content
+            )
+            
+            self.vector_db.upsert_markdown_file(category="locations", filename=location_id)
+            
+            conn = get_db_connection(self.campaign_slug)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE locations SET is_generated = 1 WHERE id = ?", (location_id,))
+            conn.commit()
+            print(f"[JIT Generator] Asset written and indexed: '{name}'\n")
+            
+        conn.close()
+
+    def _detect_and_handle_movement(self, user_input: str) -> Optional[str]:
+        """Intercepts movement intent. If connected, transitions the node; if unmapped, triggers redirection."""
+        user_input_lower = user_input.lower()
+        movement_triggers = ["go to", "walk to", "travel to", "head to", "move to", "enter", "leave", "exit"]
+        
+        is_moving = any(trigger in user_input_lower for trigger in movement_triggers)
+        if not is_moving:
+            directions = ["north", "south", "east", "west"]
+            is_moving = any(f"go {d}" in user_input_lower or f"walk {d}" in user_input_lower for d in directions)
+            
+        if is_moving:
+            connections = self._get_connected_locations()
+            for conn in connections:
+                clean_id = conn["id"].replace(f"{self.campaign_slug}_", "").replace("_", " ")
+                if conn["id"].lower() in user_input_lower or conn["name"].lower() in user_input_lower or clean_id in user_input_lower:
+                    old_loc = self.current_location_slug
+                    self.current_location_slug = conn["id"]
+                    
+                    self._ensure_location_generated(conn["id"])
+                    
+                    return f"SYSTEM UPDATE: Player successfully moved from '{old_loc}' to '{conn['id']}' ({conn['name']}). You must narrate their departure, short journey, and physical arrival."
+            
+            return "SYSTEM UPDATE: Player attempted to travel to an unmapped area or leave the boundaries of the current location. You must narrate a natural physical or environmental obstacle blocking their path and redirect them back."
+            
+        return None
 
 if __name__ == "__main__":
     campaign = "brindlemark_dragon_spine"

@@ -5,17 +5,17 @@ from pydantic import BaseModel, Field, ValidationError
 from typing import List, Dict, Any, Optional, Literal, Union
 
 class GameActionPayload(BaseModel):
-    action_type: Literal["damage", "heal", "add_item", "remove_item", "skill_check", "none"] = Field(
+    action_type: Literal["damage", "heal", "skill_check", "move", "none"] = Field(
         ..., 
         description="The mechanical action type to perform on the database."
     )
     target_id: str = Field(
         ..., 
-        description="The ID of the target (e.g., 'player', 'actor_barnaby', 'chest_01'). Use 'none' if inapplicable."
+        description="The ID of the target. Use 'none' if inapplicable."
     )
     value: Union[int, str] = Field(
         ..., 
-        description="The numeric amount (e.g. damage/gold) or string identifier (e.g. item name) related to the action."
+        description="The numeric amount or string identifier (e.g. skill name, item name, or destination ID)."
     )
     explanation: str = Field(
         ..., 
