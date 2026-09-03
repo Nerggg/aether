@@ -13,11 +13,37 @@ def get_db_connection(campaign_slug: str, base_dir: str = "data") -> sqlite3.Con
     
     if db_is_new:
         schema = """
+        CREATE TABLE IF NOT EXISTS campaign_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_name TEXT NOT NULL,
+            setting_description TEXT NOT NULL,
+            primary_threat TEXT NOT NULL,
+            starting_quest_hook TEXT NOT NULL,
+            theme_vibe TEXT,
+            starting_patron TEXT,
+            victory_condition TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS locations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            brief_concept TEXT NOT NULL,
+            is_generated INTEGER NOT NULL DEFAULT 0 CHECK(is_generated IN (0, 1))
+        );
+
+        CREATE TABLE IF NOT EXISTS location_connections (
+            from_location_id TEXT NOT NULL,
+            to_location_id TEXT NOT NULL,
+            PRIMARY KEY (from_location_id, to_location_id),
+            FOREIGN KEY (from_location_id) REFERENCES locations(id) ON DELETE CASCADE,
+            FOREIGN KEY (to_location_id) REFERENCES locations(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS characters (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             type TEXT NOT NULL CHECK(type IN ('player', 'ally', 'enemy', 'merchant')),
-            location_id TEXT NOT NULL DEFAULT 'global', -- NEW: Tracks physical location of characters
+            location_id TEXT NOT NULL DEFAULT 'global',
             strength INTEGER NOT NULL CHECK(strength >= 1 AND strength <= 30),
             dexterity INTEGER NOT NULL CHECK(dexterity >= 1 AND dexterity <= 30),
             constitution INTEGER NOT NULL CHECK(constitution >= 1 AND constitution <= 30),
