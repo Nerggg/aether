@@ -53,15 +53,33 @@ class StateReconciler:
             return ""
 
         SKILL_MAP = {
-            "stealth": "dexterity",
-            "sleight of hand": "dexterity",
+            # strength
             "athletics": "strength",
-            "history": "intelligence",
+            
+            # dexterity
+            "acrobatics": "dexterity",
+            "sleight of hand": "dexterity",
+            "stealth": "dexterity",
+            
+            # intelligence
             "arcana": "intelligence",
+            "history": "intelligence",
+            "investigation": "intelligence",
+            "nature": "intelligence",
+            "religion": "intelligence",
+            
+            # wisdom
+            "animal handling": "wisdom",
             "insight": "wisdom",
+            "medicine": "wisdom",
             "perception": "wisdom",
-            "persuasion": "charisma",
-            "intimidation": "charisma"
+            "survival": "wisdom",
+            
+            # charisma
+            "deception": "charisma",
+            "intimidation": "charisma",
+            "performance": "charisma",
+            "persuasion": "charisma"
         }
 
         print(f"[Reconciler] Action: {action} | Target: {target} | Val: {val}")
