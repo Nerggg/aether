@@ -154,8 +154,15 @@ class CharacterCreator:
                 rag_context_chunks=[],
                 chat_history=self.chat_history
             )
-            response = self.llm.generate_narrative(messages, model=self.llm.model_name, temperature=0.7)
-            print(f"\nGuide: {response}")
+            
+            print("\nGuide: ", end="", flush=True)
+            response_chunks = []
+            for chunk in self.llm.generate_narrative_stream(messages, model=self.llm.model_name, temperature=0.7):
+                print(chunk, end="", flush=True)
+                response_chunks.append(chunk)
+            print()
+            
+            response = "".join(response_chunks)
             self.chat_history.append({"role": "assistant", "content": response})
 
     def _calculate_character_stats(self, race: str, char_class: str):
