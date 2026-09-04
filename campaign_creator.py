@@ -182,39 +182,33 @@ class CampaignCreator:
         campaign_slug = self.slugify(chosen_name)
         print(f"\nSetting finalized campaign name to: '{chosen_name}' (Slug: {campaign_slug})")
 
-        print("\n[2/4] Executing sequential storyline Chain-of-Thought generation...")
+        print("\n[2/4] Compiling finalized narrative structure and secret victory metrics...")
         
-        beginning_sys = f"You are a master RPG writer. Based on the setting '{self.checklist['setting_description']}', the threat '{self.checklist['primary_threat']}', and starting patron '{derived_meta.starting_patron}', write a highly descriptive narrative outline for the Beginning of this adventure."
-        beginning_text = self.llm.generate_narrative([{"role": "system", "content": beginning_sys}], model=self.llm.model_name, temperature=0.7)
+        story_sys = f"""
+        You are a master RPG writer. Based on the setting '{self.checklist['setting_description']}', the threat '{self.checklist['primary_threat']}', and starting patron '{derived_meta.starting_patron}', compile a complete campaign storyline.
+        Output your response strictly conforming to the StorylineBlueprint JSON schema.
         
-        middle_sys = f"You are a master RPG writer. Given the setting, threat, and the Beginning story beat:\n{beginning_text}\n\nWrite a highly descriptive narrative outline for the Middle part of this campaign detailing 2-3 specific complications, milestones, and travel obstacles."
-        middle_text = self.llm.generate_narrative([{"role": "system", "content": middle_sys}], model=self.llm.model_name, temperature=0.7)
-        
-        print("Compiling final narrative structure and secret victory metrics...")
-        end_sys = f"""
-        Analyze the Beginning and Middle outlines and output the complete StorylineBlueprint JSON schema.
-        Define the final confrontation scenario under 'end', and establish a precise, hidden 'victory_condition' metric (e.g. 'Defeat the swamp witch').
-        
-        Beginning Outline:
-        {beginning_text}
-        
-        Middle Outline:
-        {middle_text}
+        Write highly detailed, atmospheric, paragraph-length descriptions for:
+        - 'beginning': the starting situation and opening scene.
+        - 'middle': 2-3 major complications, milestones, and travel obstacles.
+        - 'end': the final dramatic climax and confrontation.
+        - 'victory_condition': the exact mechanical objective required to win.
         """
+        
         try:
             response = ollama.chat(
                 model=self.llm.referee_model,
-                messages=[{"role": "system", "content": end_sys}],
+                messages=[{"role": "system", "content": story_sys}],
                 format=StorylineBlueprint.model_json_schema(),
-                options={"temperature": 0.5}
+                options={"temperature": 0.7}
             )
             storyline_data = StorylineBlueprint.model_validate_json(response["message"]["content"])
         except Exception as e:
             print(f"[Warning] Storyline compilation failed: {e}. Defaulting structure.")
             storyline_data = StorylineBlueprint(
-                beginning=beginning_text,
-                middle=middle_text,
-                end="The players confront the threat in a dramatic final battle.",
+                beginning="The campaign begins in the safe haven under the patron's guidance.",
+                middle="The journey presents several dangerous milestones across the wilderness.",
+                end="The players confront the main threat in a dramatic climax.",
                 victory_condition=f"Defeat {self.checklist['primary_threat']}"
             )
 

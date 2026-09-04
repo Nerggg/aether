@@ -400,7 +400,7 @@ class GameOrchestrator:
                 
         elif action == "TAKE_DAMAGE":
             try:
-                dmg = int(value)
+                dmg = abs(int(value))
                 new_hp = max(0, hp - dmg)
                 cursor.execute("UPDATE characters SET hp = ? WHERE name = ?", (new_hp, name))
                 conn.commit()
@@ -410,7 +410,7 @@ class GameOrchestrator:
                 
         elif action == "HEAL_HP":
             try:
-                heal = int(value)
+                heal = abs(int(value))
                 new_hp = min(max_hp, hp + heal)
                 cursor.execute("UPDATE characters SET hp = ? WHERE name = ?", (new_hp, name))
                 conn.commit()

@@ -41,6 +41,7 @@ class CharacterChecklistParser(BaseModel):
     name: Optional[str] = Field(None, description="The chosen character name if mentioned, otherwise null.")
     race: Optional[ALLOWED_RACES] = Field(None, description="The chosen race from the allowed list if mentioned, otherwise null.")
     character_class: Optional[ALLOWED_CLASSES] = Field(None, description="The chosen class from the allowed list if mentioned, otherwise null.")
+    backstory: Optional[str] = Field(None, description="A brief summary of their background, personality, or origins if discussed, otherwise null.")
 
 
 class CompiledCharacterPayload(BaseModel):
@@ -63,7 +64,8 @@ class CharacterCreator:
         self.checklist = {
             "name": None,
             "race": None,
-            "character_class": None
+            "character_class": None,
+            "backstory": None
         }
 
     @staticmethod
@@ -115,8 +117,9 @@ class CharacterCreator:
                         if parsed_response.name: self.checklist["name"] = parsed_response.name
                         if parsed_response.race: self.checklist["race"] = parsed_response.race
                         if parsed_response.character_class: self.checklist["character_class"] = parsed_response.character_class
+                        if parsed_response.backstory: self.checklist["backstory"] = parsed_response.backstory
                         
-                    print(f"[Checklist Status] Name: {'OK' if self.checklist['name'] else 'PENDING'} | Race: {'OK' if self.checklist['race'] else 'PENDING'} | Class: {'OK' if self.checklist['character_class'] else 'PENDING'}")
+                    print(f"[Checklist Status] Name: {'OK' if self.checklist['name'] else 'PENDING'} | Race: {'OK' if self.checklist['race'] else 'PENDING'} | Class: {'OK' if self.checklist['character_class'] else 'PENDING'} | Backstory: {'OK' if self.checklist['backstory'] else 'PENDING'}")
                 except Exception as e:
                     print(f"[Debug] Parsing warning: {e}")
 
@@ -134,9 +137,10 @@ class CharacterCreator:
             - name: {'COMPLETED ({})'.format(self.checklist['name']) if self.checklist['name'] else 'PENDING'}
             - race: {'COMPLETED ({})'.format(self.checklist['race']) if self.checklist['race'] else 'PENDING'}
             - character_class: {'COMPLETED ({})'.format(self.checklist['character_class']) if self.checklist['character_class'] else 'PENDING'}
+            - backstory: {'COMPLETED' if self.checklist['backstory'] else 'PENDING'}
 
             INSTRUCTIONS:
-            - Focus on PENDING parameters. Ask about ONE parameter at a time.
+            - Focus on asking questions to resolve the PENDING traits. Ask about ONE trait at a time.
             - You must ALWAYS present your questions as a multiple-choice selection structured EXACTLY in this format:
               A) [Suggestion 1]
               B) [Suggestion 2]
