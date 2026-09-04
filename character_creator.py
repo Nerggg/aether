@@ -137,7 +137,11 @@ class CharacterCreator:
 
             INSTRUCTIONS:
             - Focus on PENDING parameters. Ask about ONE parameter at a time.
-            - You must ALWAYS present your questions as a multiple-choice selection labeled A, B, and C containing creative suggestions, with option D reserved for 'Something else / Player's custom input'.
+            - You must ALWAYS present your questions as a multiple-choice selection structured EXACTLY in this format:
+              A) [Suggestion 1]
+              B) [Suggestion 2]
+              C) [Suggestion 3]
+              D) Something else / Player's custom input
             - Keep your introductory text highly concise (under 50 words) and speak in a highly collaborative, creative, and immersive world-building tone.
             """
             
@@ -243,6 +247,7 @@ class CharacterCreator:
 
     def _save_to_database_and_disk(self, data: CompiledCharacterPayload, stats: dict, hp: int, ac: int) -> None:
         char_slug = self.slugify(data.name)
+        starting_items = ["Leather armor", "Short sword", "Stale bread"]
         
         actor_metadata = {
             "id": char_slug,
@@ -252,8 +257,10 @@ class CharacterCreator:
             "class": data.character_class,
             "type": "player",
             "status": "alive",
-            "inventory": ["Leather armor", "Short sword", "Stale bread"]
+            "inventory": starting_items
         }
+        
+        inventory_str = ", ".join(starting_items)
         
         actor_content = (
             f"# Character Sheet: {data.name}\n\n"
@@ -264,7 +271,9 @@ class CharacterCreator:
             f"- INT: {stats['intelligence']} | WIS: {stats['wisdom']} | CHA: {stats['charisma']}\n\n"
             f"## Combat Values\n"
             f"- **HP:** {hp}/{hp}\n"
-            f"- **AC:** {ac}\n"
+            f"- **AC:** {ac}\n\n"
+            f"## Inventory & Equipment\n"
+            f"- {inventory_str}\n"
         )
         
         filename = f"{self.campaign_slug}_{char_slug}"

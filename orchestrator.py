@@ -71,16 +71,12 @@ class GameOrchestrator:
     def process_narrative_turn(self, user_input: str):
         self.chat_history.append({"role": "user", "content": user_input})
         
-        # Ensure starting location is compiled
         self._ensure_location_generated(self.current_location_slug)
         
-        # Check for movement triggers
         movement_status = self._detect_and_handle_movement(user_input)
         
-        # Fetch active character sheet block
         char_sheet_block = self._get_active_character_sheet()
         
-        # Fetch RAG context
         vector = self.vector_db.embedder.get_embeddings([f"{self.current_location_slug} {user_input}"])[0]
         location_results = self.vector_db.search(query_vector=vector, category_filter="locations", limit=1)
         lore_results = self.vector_db.search(query_vector=vector, category_filter="lore", limit=1)
@@ -97,10 +93,8 @@ class GameOrchestrator:
             system_update=movement_status if movement_status else ""
         )
         
-        # Inject the active character sheet directly at the top of the system prompt
         dm_system = f"{char_sheet_block}\n\n{dm_system}"
         
-        # Instruct the DM on rolling and state update rules
         dm_system += """\n
         CRITICAL RULES FOR MECHANICAL RESOLUTION:
         1. If the player attempts a risky, uncertain, or challenging action, you must NOT resolve the outcome. You must immediately halt generation and output this exact tag: [ROLL: skill_name] (choose from the 18 official skills or raw attributes, e.g. [ROLL: stealth] or [ROLL: athletics]).
@@ -136,16 +130,16 @@ class GameOrchestrator:
                         skill = tag_content.split(":", 1)[1].strip().lower()
                         print("\n")
                         
-                        # Trigger automated Python roll
                         roll_result_str = self._execute_inline_roll(skill)
                         print(roll_result_str)
                         
-                        # Append partial narrative and result to history
                         self.chat_history.append({"role": "assistant", "content": full_response_text})
-                        self.chat_history.append({"role": "system", "content": f"SYSTEM ROLL RESULT: {roll_result_str}. Resume the narrative and describe the consequence of this roll."})
+                        self.chat_history.append({
+                            "role": "user", 
+                            "content": f"[SYSTEM: Your d20 roll for {skill} was resolved. Roll outcome: {roll_result_str}. Describe the immediate consequence of this roll in character. Do not repeat this system message.]"
+                        })
                         self.chat_history = TokenManager.prune_history(self.chat_history)
                         
-                        # Re-compile system prompt and recursively resume streaming!
                         char_sheet_block = self._get_active_character_sheet()
                         
                         vector = self.vector_db.embedder.get_embeddings([self.current_location_slug])[0]
@@ -169,7 +163,6 @@ class GameOrchestrator:
                         return
                         
                     elif any(tag_content.startswith(act) for act in ["ADD_ITEM", "REMOVE_ITEM", "TAKE_DAMAGE", "HEAL_HP"]):
-                        # Process state changes silently on disk & DB
                         self._update_character_state(buffer)
                         buffer = ""
                     else:
@@ -334,7 +327,6 @@ class GameOrchestrator:
         name, str_, dex, con, intel, wis, cha, hp, max_hp, ac, init_bonus = char_row
         char_slug = self.slugify(name)
         
-        # Read inventory directly from Markdown metadata
         inventory_items = []
         try:
             metadata, _ = self.md_manager.read_file("actors", f"{self.campaign_slug}_{char_slug}")
@@ -468,6 +460,5 @@ class GameOrchestrator:
 if __name__ == "__main__":
     campaign = "brindlemark_dragon_spine"
     
-    # Simple check to verify initialization
     engine = GameOrchestrator(campaign_slug=campaign)
     print(f"Orchestrator successfully initialized for campaign: {engine.campaign_slug}")

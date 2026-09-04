@@ -120,7 +120,11 @@ class CampaignCreator:
 
             INSTRUCTIONS:
             - Focus on PENDING parameters. Ask about ONE parameter at a time.
-            - You must ALWAYS present your questions as a multiple-choice selection labeled A, B, and C containing creative suggestions, with option D reserved for 'Something else / Player's custom input'.
+            - You must ALWAYS present your questions as a multiple-choice selection structured EXACTLY in this format:
+              A) [Suggestion 1]
+              B) [Suggestion 2]
+              C) [Suggestion 3]
+              D) Something else / Player's custom input
             - Keep your introductory text highly concise (under 50 words) and speak in a highly collaborative, creative, and immersive world-building tone.
             """
             
