@@ -2,36 +2,6 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Literal
 import inspect
 
-class EnvironmentStateUpdate(BaseModel):
-    ambient_changes: str = Field(
-        ..., 
-        description="Changes to lighting, weather, sound, or smell (e.g., 'The torches flicker and die, plunging the room into darkness.')"
-    )
-    object_states: str = Field(
-        ..., 
-        description="Changes to physical doors, chest locks, active fires, or traps (e.g., 'The wooden chest is now broken open.')"
-    )
-    danger_level: Literal["safe", "low", "medium", "high"] = Field(
-        ..., 
-        description="The modified level of physical risk in the environment."
-    )
-
-
-class CombatAction(BaseModel):
-    target_id: str = Field(
-        ..., 
-        description="The ID of the opponent being targeted (e.g. 'player_warrior'). Use 'none' if fleeing/using an item on self."
-    )
-    action_type: Literal["melee_attack", "ranged_attack", "cast_spell", "flee", "use_item"] = Field(
-        ..., 
-        description="The general category of the combat action."
-    )
-    action_detail: str = Field(
-        ..., 
-        description="A short phrase detailing the action (e.g., 'Slashes with Rust-bitten Scimitar', 'Drinks Potion of Speed')."
-    )
-
-
 class DMAgent:
     
     def compile_prompt(self, location_lore: str, system_update: str = "") -> str:
@@ -57,26 +27,7 @@ class DMAgent:
             
         return prompt.strip()
 
-
-class EnvironmentAgent:
-    
-    def compile_prompt(self, player_action: str, current_states: str) -> str:
-        return inspect.cleandoc(f"""
-        You are the Physical Environment Engine for this game. 
-        Your job is to analyze the player's action and update the state of the surrounding space, objects, and hazards.
-        
-        Current World State properties:
-        {current_states}
-        
-        Player's proposed action:
-        "{player_action}"
-        
-        Output strictly in the EnvironmentStateUpdate JSON format. Do not write dialogue.
-        """)
-
-
 class ActorAgent:
-    
     def compile_narrative_prompt(self, actor_stats: Dict[str, Any], actor_lore: str) -> str:
         
         name = actor_stats.get("name", "An unknown figure")
@@ -104,34 +55,8 @@ class ActorAgent:
         """)
         return prompt.strip()
 
-    def compile_combat_prompt(self, actor_stats: Dict[str, Any], opponent_descriptions: str, history: List[Dict[str, str]]) -> str:
-        
-        name = actor_stats.get("name", "The Combatant")
-        hp = actor_stats.get("hp", 10)
-        max_hp = actor_stats.get("max_hp", 10)
-        
-        prompt = f"""
-        You are the Combat tactical brain for the actor '{name}'.
-        Current Vitality: HP is {hp}/{max_hp}
-        
-        Your D&D Stats:
-        STR: {actor_stats.get('strength', 10)} | DEX: {actor_stats.get('dexterity', 10)} | CON: {actor_stats.get('constitution', 10)}
-        INT: {actor_stats.get('intelligence', 10)} | WIS: {actor_stats.get('wisdom', 10)} | CHA: {actor_stats.get('charisma', 10)}
-        
-        Active Combat Opponents in view:
-        {opponent_descriptions}
-        
-        INSTRUCTIONS:
-        - Analyze your stats, HP, and opponents to decide on your next action.
-        - If you are a low-HP or cowardly enemy (like a goblin), prioritize fleeing or ranged attacks.
-        - If you have high strength, prefer melee.
-        - Output strictly in the CombatAction JSON format.
-        """
-        return prompt.strip()
-
 if __name__ == "__main__":
     dm_agent = DMAgent()
-    env_agent = EnvironmentAgent()
     actor_agent = ActorAgent()
 
     print("\n--- Test 1: Compile DM Agent Prompt with Spiked Trap Update ---")
@@ -144,17 +69,7 @@ if __name__ == "__main__":
     )
     print(compiled_dm_prompt)
 
-    print("\n--- Test 2: Compile Environment Agent Prompt for Trap Sprung ---")
-    mock_action = "I pull out a crowbar and jam it into the floor pressure plate."
-    mock_ambient = "Old stone floor, torches on walls, pressure plate is active."
-    
-    compiled_env_prompt = env_agent.compile_prompt(
-        player_action=mock_action,
-        current_states=mock_ambient
-    )
-    print(compiled_env_prompt)
-
-    print("\n--- Test 3: Compile Actor Agent Prompt for Injured Goblin ---")
+    print("\n--- Test 2: Compile Actor Agent Prompt for Injured Goblin ---")
     mock_goblin_stats = {
         "name": "Gruk the Rusty",
         "type": "enemy",
