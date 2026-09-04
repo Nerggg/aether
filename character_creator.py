@@ -251,7 +251,8 @@ class CharacterCreator:
             "race": data.race,
             "class": data.character_class,
             "type": "player",
-            "status": "alive"
+            "status": "alive",
+            "inventory": ["Leather armor", "Short sword", "Stale bread"]
         }
         
         actor_content = (

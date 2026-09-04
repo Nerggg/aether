@@ -107,8 +107,29 @@ def main():
 
             if player_input.startswith("/"):
                 command = player_input.lower().strip()
+                
                 if command == "/stats" or command == "/inventory":
-                    print("\n[System] Character sheet tools are being migrated to the new flat-text system.")
+                    try:
+                        conn = get_db_connection(game.campaign_slug)
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT name FROM characters WHERE type = 'player' LIMIT 1")
+                        row = cursor.fetchone()
+                        conn.close()
+                        
+                        if row:
+                            name = row[0]
+                            char_slug = game.slugify(name)
+                            meta, content = game.md_manager.read_file("actors", f"{game.campaign_slug}_{char_slug}")
+                            
+                            print("\n=======================================================")
+                            print(f"             CHARACTER SHEET: {meta['name'].upper()}")
+                            print("=======================================================")
+                            print(content.strip())
+                            print("=======================================================\n")
+                        else:
+                            print("\n[System] No active character registered in this slot.")
+                    except Exception as e:
+                        print(f"\n[System] Error reading character sheet: {e}")
                     continue
                 else:
                     print("\n[System] Unknown slash command.")
