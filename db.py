@@ -53,7 +53,9 @@ def get_db_connection(campaign_slug: str, base_dir: str = "data") -> sqlite3.Con
             hp INTEGER NOT NULL CHECK(hp >= 0),
             max_hp INTEGER NOT NULL CHECK(max_hp > 0),
             ac INTEGER NOT NULL CHECK(ac >= 0),
-            initiative_bonus INTEGER NOT NULL DEFAULT 0
+            initiative_bonus INTEGER NOT NULL DEFAULT 0,
+            is_persistent INTEGER NOT NULL DEFAULT 1 CHECK(is_persistent IN (0, 1)),
+            template_id TEXT
         );
         """
         try:

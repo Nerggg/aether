@@ -77,6 +77,23 @@ class GameOrchestrator:
         
         char_sheet_block = self._get_active_character_sheet()
         
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name, type, hp, max_hp, ac, is_persistent 
+            FROM characters 
+            WHERE location_id = ? AND type != 'player'
+        """, (self.current_location_slug,))
+        local_characters = cursor.fetchall()
+        conn.close()
+        
+        local_presence_block = ""
+        if local_characters:
+            local_presence_block = "\n### CHARACTERS PRESENT AT CURRENT LOCATION:\n"
+            for name, char_type, hp, max_hp, ac, is_p in local_characters:
+                persist_str = "Persistent" if is_p else "Ephemeral"
+                local_presence_block += f"- **{name}** ({char_type.upper()} | {persist_str}) | HP: {hp}/{max_hp} | AC: {ac}\n"
+        
         vector = self.vector_db.embedder.get_embeddings([f"{self.current_location_slug} {user_input}"])[0]
         location_results = self.vector_db.search(query_vector=vector, category_filter="locations", limit=1)
         lore_results = self.vector_db.search(query_vector=vector, category_filter="lore", limit=1)
@@ -88,8 +105,12 @@ class GameOrchestrator:
         if lore_results:
             rag_chunks.append(f"PROSE INSPIRATION:\n{lore_results[0]['document']}")
             
+        location_lore_combined = "\n\n".join(rag_chunks)
+        if local_presence_block:
+            location_lore_combined += f"\n{local_presence_block}"
+            
         dm_system = self.dm_agent.compile_prompt(
-            location_lore="\n\n".join(rag_chunks),
+            location_lore=location_lore_combined,
             system_update=movement_status if movement_status else ""
         )
         
@@ -182,6 +203,8 @@ class GameOrchestrator:
             
         self.chat_history.append({"role": "assistant", "content": full_response_text})
         self.chat_history = TokenManager.prune_history(self.chat_history)
+
+        self._run_referee_state_reconciliation()
 
     def set_state(self, new_state: str) -> None:
         self.state = new_state
@@ -285,8 +308,24 @@ class GameOrchestrator:
                 clean_id = conn["id"].replace(f"{self.campaign_slug}_", "").replace("_", " ")
                 if conn["id"].lower() in user_input_lower or conn["name"].lower() in user_input_lower or clean_id in user_input_lower:
                     old_loc = self.current_location_slug
-                    self.current_location_slug = conn["id"]
                     
+                    db_conn = get_db_connection(self.campaign_slug)
+                    cursor = db_conn.cursor()
+                    try:
+                        cursor.execute("""
+                            DELETE FROM characters 
+                            WHERE location_id = ? AND type != 'player' AND is_persistent = 0
+                        """, (old_loc,))
+                        db_conn.commit()
+                        purged_count = cursor.rowcount
+                        if purged_count > 0:
+                            print(f"[Engine State] Purged {purged_count} ephemeral NPCs from old location '{old_loc}'")
+                    except sqlite3.Error as e:
+                        print(f"[Engine Error] Failed to purge ephemeral NPCs: {e}")
+                    finally:
+                        db_conn.close()
+
+                    self.current_location_slug = conn["id"]
                     self._ensure_location_generated(conn["id"])
                     
                     return f"SYSTEM UPDATE: Player successfully moved from '{old_loc}' to '{conn['id']}' ({conn['name']}). You must narrate their departure, short journey, and physical arrival."
@@ -456,6 +495,114 @@ class GameOrchestrator:
         total = d20 + modifier
         
         return f"Got {d20} + {modifier} ({ability} modifier) = {total}!"
+
+    def _run_referee_state_reconciliation(self) -> None:
+        """Invokes the Referee Agent silently to evaluate if a new actor was dynamically met."""
+        referee_system = """
+        You are the system referee. Analyze the recent conversational turn (user action and the DM description) to decide if a new character was introduced, met, or spawned in the scene.
+        
+        CRITICAL RULES:
+        1. If a new character is introduced, set action_type to 'spawn_npc' and populate 'spawned_npc'.
+        2. Set is_persistent to true ONLY for major recurring allies, named bosses, or significant quest-givers.
+        3. Set is_persistent to false for generic, non-crucial NPCs (shopkeepers, guards, low-importance enemies like generic goblins).
+        4. If no character is introduced, set action_type to 'none'.
+        """
+        
+        referee_history = self.chat_history[-2:]
+        compiled_referee = PromptBuilder.compile_messages(referee_system, [], referee_history)
+        
+        payload = self.llm.generate_structured_action(
+            messages=compiled_referee,
+            response_schema=GameActionPayload,
+            temperature=0.0
+        )
+        
+        if payload and payload.action_type == "spawn_npc" and payload.spawned_npc:
+            print(f"\n[Referee] Detected dynamic NPC introduction: '{payload.spawned_npc.name}' ({payload.spawned_npc.type})")
+            self._handle_dynamic_npc_spawn(payload.spawned_npc)
+
+    def _handle_dynamic_npc_spawn(self, npc_details) -> None:
+        """Saves met NPCs. Persistent ones get Markdown + SQLite profiles, generic ones are SQLite-only."""
+        name = npc_details.name
+        char_type = npc_details.type
+        is_persistent = 1 if npc_details.is_persistent else 0
+        backstory = npc_details.brief_backstory or f"A generic {char_type} met in the campaign."
+        template_id = npc_details.template_id
+        
+        if is_persistent == 1:
+            strength, dexterity, constitution = 14, 12, 13
+            intelligence, wisdom, charisma = 10, 12, 14
+            hp, max_hp, ac = 12, 12, 13
+        else:
+            strength, dexterity, constitution = 10, 10, 10
+            intelligence, wisdom, charisma = 10, 10, 10
+            hp, max_hp, ac = 6, 6, 10
+            
+        if template_id:
+            if "goblin" in template_id.lower():
+                strength, dexterity, constitution = 8, 14, 10
+                intelligence, wisdom, charisma = 10, 8, 8
+                hp, max_hp, ac = 7, 7, 12
+            elif "giant_rat" in template_id.lower():
+                strength, dexterity, constitution = 7, 15, 11
+                intelligence, wisdom, charisma = 2, 10, 4
+                hp, max_hp, ac = 7, 7, 12
+
+        initiative_bonus = (dexterity - 10) // 2
+        
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+            INSERT INTO characters (name, type, location_id, strength, dexterity, constitution, intelligence, wisdom, charisma, hp, max_hp, ac, initiative_bonus, is_persistent, template_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                name, char_type, self.current_location_slug,
+                strength, dexterity, constitution, intelligence, wisdom, charisma,
+                hp, hp, ac, initiative_bonus, is_persistent, template_id
+            ))
+            conn.commit()
+            print(f"[Engine State] Registered NPC '{name}' in SQLite under '{self.current_location_slug}'")
+        except sqlite3.Error as e:
+            print(f"[Engine Error] SQLite dynamic insertion failed: {e}")
+        finally:
+            conn.close()
+            
+        if is_persistent == 1:
+            char_slug = self.slugify(name)
+            filename = f"{self.campaign_slug}_{char_slug}"
+            
+            actor_metadata = {
+                "id": char_slug,
+                "campaign_slug": self.campaign_slug,
+                "name": name,
+                "type": char_type,
+                "is_persistent": True
+            }
+            
+            actor_content = (
+                f"# Actor Sheet: {name}\n\n"
+                f"**Role:** {char_type.capitalize()} | **Location:** {self.current_location_slug}\n\n"
+                f"## Backstory & Background Lore\n{backstory}\n\n"
+                f"## Determined Stats\n"
+                f"- STR: {strength} | DEX: {dexterity} | CON: {constitution}\n"
+                f"- INT: {intelligence} | WIS: {wisdom} | CHA: {charisma}\n\n"
+                f"## Combat Profile\n"
+                f"- **HP:** {hp}/{max_hp}\n"
+                f"- **AC:** {ac}\n"
+            )
+            
+            try:
+                self.md_manager.write_file(
+                    category="actors",
+                    filename=filename,
+                    metadata=actor_metadata,
+                    content=actor_content
+                )
+                self.vector_db.upsert_markdown_file(category="actors", filename=filename)
+                print(f"[Engine State] Wrote detailed persistent character Markdown profile: '{filename}.md'")
+            except Exception as e:
+                print(f"[Engine Error] Failed to write persistent Markdown profile: {e}")
 
 if __name__ == "__main__":
     campaign = "brindlemark_dragon_spine"
