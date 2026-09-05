@@ -53,31 +53,9 @@ def get_db_connection(campaign_slug: str, base_dir: str = "data") -> sqlite3.Con
             hp INTEGER NOT NULL CHECK(hp >= 0),
             max_hp INTEGER NOT NULL CHECK(max_hp > 0),
             ac INTEGER NOT NULL CHECK(ac >= 0),
-            initiative_bonus INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            value INTEGER NOT NULL CHECK(value >= 0),
-            weight REAL NOT NULL CHECK(weight >= 0.0),
-            description TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS inventories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_type TEXT NOT NULL CHECK(owner_type IN ('player', 'actor', 'container')),
-            owner_id INTEGER NOT NULL,
-            item_id INTEGER NOT NULL,
-            quantity INTEGER NOT NULL DEFAULT 1 CHECK(quantity > 0),
-            FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS combat_queue (
-            actor_id INTEGER PRIMARY KEY,
-            roll_result INTEGER NOT NULL CHECK(roll_result >= 1),
-            turn_order INTEGER NOT NULL UNIQUE,
-            FOREIGN KEY (actor_id) REFERENCES characters(id) ON DELETE CASCADE
+            initiative_bonus INTEGER NOT NULL DEFAULT 0,
+            is_persistent INTEGER NOT NULL DEFAULT 1 CHECK(is_persistent IN (0, 1)),
+            template_id TEXT
         );
         """
         try:

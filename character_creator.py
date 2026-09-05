@@ -41,6 +41,7 @@ class CharacterChecklistParser(BaseModel):
     name: Optional[str] = Field(None, description="The chosen character name if mentioned, otherwise null.")
     race: Optional[ALLOWED_RACES] = Field(None, description="The chosen race from the allowed list if mentioned, otherwise null.")
     character_class: Optional[ALLOWED_CLASSES] = Field(None, description="The chosen class from the allowed list if mentioned, otherwise null.")
+    backstory: Optional[str] = Field(None, description="A brief summary of their background, personality, or origins if discussed, otherwise null.")
 
 
 class CompiledCharacterPayload(BaseModel):
@@ -63,8 +64,15 @@ class CharacterCreator:
         self.checklist = {
             "name": None,
             "race": None,
-            "character_class": None
+            "character_class": None,
+            "backstory": None
         }
+
+        try:
+            _, content = self.md_manager.read_file("campaigns", f"{self.campaign_slug}_info")
+            self.campaign_context = content.strip()
+        except Exception:
+            self.campaign_context = "A standard fantasy world with typical D&D factions and regions."
 
     @staticmethod
     def slugify(text: str) -> str:
@@ -115,8 +123,9 @@ class CharacterCreator:
                         if parsed_response.name: self.checklist["name"] = parsed_response.name
                         if parsed_response.race: self.checklist["race"] = parsed_response.race
                         if parsed_response.character_class: self.checklist["character_class"] = parsed_response.character_class
+                        if parsed_response.backstory: self.checklist["backstory"] = parsed_response.backstory
                         
-                    print(f"[Checklist Status] Name: {'OK' if self.checklist['name'] else 'PENDING'} | Race: {'OK' if self.checklist['race'] else 'PENDING'} | Class: {'OK' if self.checklist['character_class'] else 'PENDING'}")
+                    print(f"[Checklist Status] Name: {'OK' if self.checklist['name'] else 'PENDING'} | Race: {'OK' if self.checklist['race'] else 'PENDING'} | Class: {'OK' if self.checklist['character_class'] else 'PENDING'} | Backstory: {'OK' if self.checklist['backstory'] else 'PENDING'}")
                 except Exception as e:
                     print(f"[Debug] Parsing warning: {e}")
 
@@ -127,17 +136,30 @@ class CharacterCreator:
 
             active_persona = f"""
             You are the Character Creation Guide. Help the player build a D&D character.
-            
+
             {DND_RULES_TEXT}
-            
+
+            ACTIVE CAMPAIGN LORE CONTEXT:
+            Below is the setting, factions, and storyline of the active campaign where this character will play. 
+            Use this context to draft custom, highly immersive backstory and background suggestions that tie the character directly to this world, its starting patron, and its environmental hazards:
+            --------------------------------------------------
+            {self.campaign_context}
+            --------------------------------------------------
+
             Here is the current status of the character checklist:
             - name: {'COMPLETED ({})'.format(self.checklist['name']) if self.checklist['name'] else 'PENDING'}
             - race: {'COMPLETED ({})'.format(self.checklist['race']) if self.checklist['race'] else 'PENDING'}
             - character_class: {'COMPLETED ({})'.format(self.checklist['character_class']) if self.checklist['character_class'] else 'PENDING'}
+            - backstory: {'COMPLETED' if self.checklist['backstory'] else 'PENDING'}
 
             INSTRUCTIONS:
-            - Focus on PENDING parameters. Ask about ONE parameter at a time.
-            - You must ALWAYS present your questions as a multiple-choice selection labeled A, B, and C containing creative suggestions, with option D reserved for 'Something else / Player's custom input'.
+            - Focus on asking questions to resolve the PENDING traits. Ask about ONE trait at a time.
+            - When suggesting backstory options (A, B, C), they MUST be deeply integrated into the ACTIVE CAMPAIGN LORE CONTEXT.
+            - You must ALWAYS present your questions as a multiple-choice selection structured EXACTLY in this format:
+              A) [Suggestion 1]
+              B) [Suggestion 2]
+              C) [Suggestion 3]
+              D) Something else / Player's custom input
             - Keep your introductory text highly concise (under 50 words) and speak in a highly collaborative, creative, and immersive world-building tone.
             """
             
@@ -146,8 +168,15 @@ class CharacterCreator:
                 rag_context_chunks=[],
                 chat_history=self.chat_history
             )
-            response = self.llm.generate_narrative(messages, model=self.llm.model_name, temperature=0.7)
-            print(f"\nGuide: {response}")
+            
+            print("\nGuide: ", end="", flush=True)
+            response_chunks = []
+            for chunk in self.llm.generate_narrative_stream(messages, model=self.llm.model_name, temperature=0.7):
+                print(chunk, end="", flush=True)
+                response_chunks.append(chunk)
+            print()
+            
+            response = "".join(response_chunks)
             self.chat_history.append({"role": "assistant", "content": response})
 
     def _calculate_character_stats(self, race: str, char_class: str):
@@ -243,6 +272,7 @@ class CharacterCreator:
 
     def _save_to_database_and_disk(self, data: CompiledCharacterPayload, stats: dict, hp: int, ac: int) -> None:
         char_slug = self.slugify(data.name)
+        starting_items = ["Leather armor", "Short sword", "Stale bread"]
         
         actor_metadata = {
             "id": char_slug,
@@ -251,8 +281,11 @@ class CharacterCreator:
             "race": data.race,
             "class": data.character_class,
             "type": "player",
-            "status": "alive"
+            "status": "alive",
+            "inventory": starting_items
         }
+        
+        inventory_str = ", ".join(starting_items)
         
         actor_content = (
             f"# Character Sheet: {data.name}\n\n"
@@ -263,7 +296,9 @@ class CharacterCreator:
             f"- INT: {stats['intelligence']} | WIS: {stats['wisdom']} | CHA: {stats['charisma']}\n\n"
             f"## Combat Values\n"
             f"- **HP:** {hp}/{hp}\n"
-            f"- **AC:** {ac}\n"
+            f"- **AC:** {ac}\n\n"
+            f"## Inventory & Equipment\n"
+            f"- {inventory_str}\n"
         )
         
         filename = f"{self.campaign_slug}_{char_slug}"

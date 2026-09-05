@@ -108,82 +108,61 @@ def main():
             if player_input.startswith("/"):
                 command = player_input.lower().strip()
                 
-                if command == "/stats":
-                    conn = get_db_connection(campaign_slug)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT name, strength, dexterity, constitution, intelligence, wisdom, charisma, hp, max_hp, ac FROM characters WHERE type = 'player'")
-                    char = cursor.fetchone()
-                    conn.close()
-                    
-                    if char:
-                        print("\n=== CHARACTER STATISTICS ===")
-                        print(f"Name: {char[0]}")
-                        print(f"HP: {char[7]}/{char[8]} | AC: {char[9]}")
-                        print(f"STR: {char[1]} | DEX: {char[2]} | CON: {char[3]}")
-                        print(f"INT: {char[4]} | WIS: {char[5]} | CHA: {char[6]}")
-                        print("=============================")
-                    else:
-                        print("\n[System] No character registered.")
-                    continue
-                    
-                elif command == "/inventory":
-                    conn = get_db_connection(campaign_slug)
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        SELECT i.name, i.weight, inv.quantity, i.description 
-                        FROM inventories inv 
-                        JOIN items i ON inv.item_id = i.id 
-                        WHERE inv.owner_type = 'player'
-                    """)
-                    items = cursor.fetchall()
-                    conn.close()
-                    
-                    print("\n=== EQUIPMENT & INVENTORY ===")
-                    if not items:
-                        print("Your pockets are empty.")
-                    for item in items:
-                        print(f"- {item[0]} x{item[2]} (Weight: {item[1]} lbs) - {item[3]}")
-                    print("==============================")
-                    continue
-                    
-                else:
-                    print("\n[System] Unknown slash command. Try '/stats' or '/inventory'.")
-                    continue
-                
-            if "attack" in player_input.lower() or "combat" in player_input.lower():
-                conn = get_db_connection(campaign_slug)
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT COUNT(*) FROM characters WHERE type = 'enemy' AND hp > 0 AND location_id = ?",
-                    (game.current_location_slug,)
-                )
-                enemy_count = cursor.fetchone()[0]
-                conn.close()
-
-                if enemy_count == 0:
-                    print(f"\n[Engine] No hostile threats detected in '{game.current_location_slug}'. Resolving action as narrative...")
-                    print("\nDungeon Master:")
-                    for chunk in game.process_narrative_turn(player_input):
-                        print(chunk, end="", flush=True)
-                    print("\n")
-                    continue
-
-                print("\n[Engine] Hostilities detected! Transitioning to Combat Mode...")
-                game.initiate_combat()
-                
-                while game.state == "COMBAT_PLAY":
-                    current_actor = game.combat_queue[game.current_turn_index]
-                    if current_actor["type"] == "player":
-                        p_turn_input = input(f"\n[Your Turn - {current_actor['name']}] Action: ").strip()
-                        if p_turn_input.lower() == "exit":
-                            break
-                        combat_reply = game.process_combat_turn(player_action_text=p_turn_input)
-                    else:
-                        input(f"\n[NPC Turn - {current_actor['name']}] Press Enter to resolve AI turn...")
-                        combat_reply = game.process_combat_turn()
+                if command == "/stats" or command == "/inventory":
+                    try:
+                        conn = get_db_connection(game.campaign_slug)
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT name FROM characters WHERE type = 'player' LIMIT 1")
+                        row = cursor.fetchone()
                         
-                    print(f"\nDungeon Master:\n{combat_reply}\n")
-                continue
+                        if row:
+                            name = row[0]
+                            char_slug = game.slugify(name)
+                            
+                            cursor.execute("""
+                                SELECT hp, max_hp, ac, strength, dexterity, constitution, intelligence, wisdom, charisma 
+                                FROM characters WHERE name = ?
+                            """, (name,))
+                            live_stats = cursor.fetchone()
+                            conn.close()
+                            
+                            meta, content = game.md_manager.read_file("actors", f"{game.campaign_slug}_{char_slug}")
+                            
+                            backstory = "No backstory recorded."
+                            if "## Backstory & Background Lore" in content:
+                                backstory = content.split("## Backstory & Background Lore")[1].split("## Determined Stats")[0].strip()
+                            
+                            if live_stats:
+                                hp, max_hp, ac, s, d, c, i, w, ch = live_stats
+                                
+                                inventory_list = meta.get("inventory", [])
+                                if isinstance(inventory_list, str):
+                                    inventory_list = [item.strip() for item in inventory_list.split(",") if item.strip()]
+                                inventory_str = ", ".join(inventory_list) if inventory_list else "Empty"
+                                
+                                print("\n=======================================================")
+                                print(f"             CHARACTER SHEET: {meta['name'].upper()}")
+                                print("=======================================================")
+                                print(f"**Race:** {meta['race']} | **Class:** {meta['class']}")
+                                print(f"\n## Backstory & Background Lore\n{backstory}")
+                                print(f"\n## Dynamic Combat Stats")
+                                print(f"- **HP:** {hp}/{max_hp}")
+                                print(f"- **AC:** {ac}")
+                                print(f"\n## Attributes")
+                                print(f"- STR: {s} | DEX: {d} | CON: {c}")
+                                print(f"- INT: {i} | WIS: {w} | CHA: {ch}")
+                                print(f"\n## Inventory & Equipment")
+                                print(f"- {inventory_str}")
+                                print("=======================================================\n")
+                        else:
+                            conn.close()
+                            print("\n[System] No active character registered in this slot.")
+                    except Exception as e:
+                        print(f"\n[System] Error reading character sheet: {e}")
+                    continue
+                else:
+                    print("\n[System] Unknown slash command.")
+                    continue
 
             print("\nDungeon Master:")
             for chunk in game.process_narrative_turn(player_input):
@@ -193,7 +172,6 @@ def main():
         except KeyboardInterrupt:
             print("\nGame interrupted. Progress saved in save slot directory. Exiting.")
             break
-
 
 if __name__ == "__main__":
     main()

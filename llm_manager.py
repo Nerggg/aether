@@ -4,8 +4,15 @@ import random
 from pydantic import BaseModel, Field, ValidationError
 from typing import List, Dict, Any, Optional, Literal, Union
 
+class NPCSpawnDetails(BaseModel):
+    name: str = Field(..., description="The unique name of the character introduced.")
+    type: Literal["ally", "enemy", "merchant"] = Field(..., description="The role or classification of the character.")
+    is_persistent: bool = Field(..., description="Whether they are a major/persistent character (allies, bosses, persistent merchants) or generic/ephemeral (goblins, random tavern patrons, generic guards).")
+    brief_backstory: Optional[str] = Field(None, description="Detailed backstory and lore if persistent. Keep null or very brief for generic characters.")
+    template_id: Optional[str] = Field(None, description="Monster template identifier (e.g. 'goblin', 'giant_rat') if applicable, else null.")
+
 class GameActionPayload(BaseModel):
-    action_type: Literal["damage", "heal", "skill_check", "move", "none"] = Field(
+    action_type: Literal["damage", "heal", "skill_check", "move", "spawn_npc", "none"] = Field(
         ..., 
         description="The mechanical action type to perform on the database."
     )
@@ -20,6 +27,10 @@ class GameActionPayload(BaseModel):
     explanation: str = Field(
         ..., 
         description="A very brief reasoning for why this action was taken."
+    )
+    spawned_npc: Optional[NPCSpawnDetails] = Field(
+        None,
+        description="Populated ONLY when action_type is 'spawn_npc'."
     )
 
 class CampaignBlueprint(BaseModel):

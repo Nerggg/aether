@@ -4,12 +4,14 @@ import random
 from typing import List, Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor
 import ollama
+import inspect
+import re
 
 from md_manager import MarkdownManager
 from vector_db_manager import VectorDBManager
 from llm_manager import LLMController, PromptBuilder, GameActionPayload
 from db import get_db_connection
-from agents import DMAgent, EnvironmentAgent, ActorAgent, CombatAction, EnvironmentStateUpdate
+from agents import DMAgent, ActorAgent
 
 
 class TokenManager:
@@ -28,135 +30,6 @@ class TokenManager:
             total_tokens = sum(cls.estimate_tokens(turn["content"]) for turn in chat_history)
         return chat_history
 
-
-class StateReconciler:
-    
-    def __init__(self, campaign_slug: str):
-        self.campaign_slug = campaign_slug
-
-    def _execute_query(self, query: str, params: Tuple = ()) -> List[Tuple]:
-        conn = get_db_connection(self.campaign_slug)
-        cursor = conn.cursor()
-        try:
-            cursor.execute(query, params)
-            conn.commit()
-            return cursor.fetchall()
-        finally:
-            conn.close()
-
-    def reconcile(self, payload: GameActionPayload) -> str:
-        action = payload.action_type
-        target = payload.target_id
-        val = payload.value
-
-        if action == "none":
-            return ""
-
-        SKILL_MAP = {
-            # strength
-            "athletics": "strength",
-            
-            # dexterity
-            "acrobatics": "dexterity",
-            "sleight of hand": "dexterity",
-            "stealth": "dexterity",
-            
-            # intelligence
-            "arcana": "intelligence",
-            "history": "intelligence",
-            "investigation": "intelligence",
-            "nature": "intelligence",
-            "religion": "intelligence",
-            
-            # wisdom
-            "animal handling": "wisdom",
-            "insight": "wisdom",
-            "medicine": "wisdom",
-            "perception": "wisdom",
-            "survival": "wisdom",
-            
-            # charisma
-            "deception": "charisma",
-            "intimidation": "charisma",
-            "performance": "charisma",
-            "persuasion": "charisma"
-        }
-
-        print(f"[Reconciler] Action: {action} | Target: {target} | Val: {val}")
-
-        if action == "skill_check":
-            skill_name = str(val).lower().strip()
-            ability = SKILL_MAP.get(skill_name, "dexterity")
-
-            query = f"SELECT {ability} FROM characters WHERE id = ? OR name LIKE ?"
-            res = self._execute_query(query, (target, f"%{target}%"))
-            if not res:
-                return f"SYSTEM REPORT: Target '{target}' not found. Roll failed."
-            
-            ability_score = res[0][0]
-            modifier = (ability_score - 10) // 2
-            
-            d20_roll = random.randint(1, 20)
-            total = d20_roll + modifier
-
-            return f"SYSTEM REPORT: {target} attempted a '{skill_name}' check. Rolled {d20_roll} + {modifier} ({ability} mod) = {total}."
-
-        elif action == "damage":
-            try:
-                damage_amount = int(val)
-                res = self._execute_query("SELECT hp, max_hp FROM characters WHERE id = ? OR name LIKE ?", (target, f"%{target}%"))
-                if not res:
-                    return f"SYSTEM REPORT: Target '{target}' not found."
-                curr_hp, max_hp = res[0][0], res[0][1]
-                new_hp = max(0, curr_hp - damage_amount)
-                self._execute_query("UPDATE characters SET hp = ? WHERE id = ? OR name LIKE ?", (new_hp, target, f"%{target}%"))
-                
-                status = f"SYSTEM REPORT: {target} took {damage_amount} damage. HP is now {new_hp}/{max_hp}."
-                if new_hp == 0:
-                    status += f" {target} has fallen unconscious or died!"
-                return status
-            except ValueError:
-                return f"SYSTEM ERROR: Invalid damage value '{val}'."
-
-        elif action == "heal":
-            try:
-                heal_amount = int(val)
-                res = self._execute_query("SELECT hp, max_hp FROM characters WHERE id = ? OR name LIKE ?", (target, f"%{target}%"))
-                if not res:
-                    return f"SYSTEM REPORT: Target '{target}' not found."
-                curr_hp, max_hp = res[0][0], res[0][1]
-                new_hp = min(max_hp, curr_hp + heal_amount)
-                self._execute_query("UPDATE characters SET hp = ? WHERE id = ? OR name LIKE ?", (new_hp, target, f"%{target}%"))
-                return f"SYSTEM REPORT: {target} healed by {heal_amount}. HP is now {new_hp}/{max_hp}."
-            except ValueError:
-                return f"SYSTEM ERROR: Invalid heal value '{val}'."
-
-        elif action == "add_item":
-            item_res = self._execute_query("SELECT id FROM items WHERE name LIKE ?", (f"%{val}%",))
-            if not item_res:
-                self._execute_query("INSERT INTO items (name, value, weight, description) VALUES (?, 0, 1.0, 'A basic item.')", (str(val),))
-                item_res = self._execute_query("SELECT id FROM items WHERE name = ?", (str(val),))
-            item_id = item_res[0][0]
-            
-            owner_res = self._execute_query("SELECT id FROM characters WHERE id = ? OR name LIKE ?", (target, f"%{target}%"))
-            if owner_res:
-                owner_id, owner_type = owner_res[0][0], "actor"
-            else:
-                owner_id, owner_type = 1, "container"
-                
-            inv_res = self._execute_query(
-                "SELECT id, quantity FROM inventories WHERE owner_type = ? AND owner_id = ? AND item_id = ?",
-                (owner_type, owner_id, item_id)
-            )
-            if inv_res:
-                self._execute_query("UPDATE inventories SET quantity = quantity + 1 WHERE id = ?", (inv_res[0][0],))
-            else:
-                self._execute_query("INSERT INTO inventories (owner_type, owner_id, item_id, quantity) VALUES (?, ?, ?, 1)", (owner_type, owner_id, item_id))
-            return f"SYSTEM REPORT: Added 1x '{val}' to {target}'s inventory."
-
-        return ""
-
-
 class GameOrchestrator:
     def __init__(self, campaign_slug: str, state: str = "NARRATIVE_PLAY"):
         self.campaign_slug = campaign_slug
@@ -165,10 +38,8 @@ class GameOrchestrator:
         self.md_manager = MarkdownManager()
         self.vector_db = VectorDBManager()
         self.llm = LLMController()
-        self.reconciler = StateReconciler(self.campaign_slug)
         
         self.dm_agent = DMAgent()
-        self.env_agent = EnvironmentAgent()
         self.actor_agent = ActorAgent()
 
         try:
@@ -204,30 +75,25 @@ class GameOrchestrator:
         
         movement_status = self._detect_and_handle_movement(user_input)
         
-        mechanical_status = ""
-        if movement_status:
-            mechanical_status = movement_status
-        else:
-            ref_prompt = """
-            You are the silent system referee. Analyze the player's last statement and decide if any numerical, 
-            stat, or item inventory updates are required.
-            Choose from these exact actions: 'damage', 'heal', 'add_item', 'remove_item', 'skill_check', 'none'.
-            Output strictly in the required JSON schema format.
-            """
-            ref_context = [f"Active character ID: 'player_warrior'", f"Action: '{user_input}'"]
-            ref_msg = PromptBuilder.compile_messages(ref_prompt, ref_context, [{"role": "user", "content": user_input}])
-            
-            action_payload = self.llm.generate_structured_action(
-                messages=ref_msg,
-                response_schema=GameActionPayload,
-                model=self.llm.referee_model,
-                temperature=0.0
-            )
-            
-            if action_payload and action_payload.action_type != "none":
-                mechanical_status = self.reconciler.reconcile(action_payload)
-                print(f"[Engine Output] {mechanical_status}")
-
+        char_sheet_block = self._get_active_character_sheet()
+        
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name, type, hp, max_hp, ac, is_persistent 
+            FROM characters 
+            WHERE location_id = ? AND type != 'player'
+        """, (self.current_location_slug,))
+        local_characters = cursor.fetchall()
+        conn.close()
+        
+        local_presence_block = ""
+        if local_characters:
+            local_presence_block = "\n### CHARACTERS PRESENT AT CURRENT LOCATION:\n"
+            for name, char_type, hp, max_hp, ac, is_p in local_characters:
+                persist_str = "Persistent" if is_p else "Ephemeral"
+                local_presence_block += f"- **{name}** ({char_type.upper()} | {persist_str}) | HP: {hp}/{max_hp} | AC: {ac}\n"
+        
         vector = self.vector_db.embedder.get_embeddings([f"{self.current_location_slug} {user_input}"])[0]
         location_results = self.vector_db.search(query_vector=vector, category_filter="locations", limit=1)
         lore_results = self.vector_db.search(query_vector=vector, category_filter="lore", limit=1)
@@ -236,218 +102,113 @@ class GameOrchestrator:
             r["document"] for r in location_results 
             if r["metadata"].get("meta_campaign_slug") == self.campaign_slug
         ]
-        
-        if not movement_status and action_payload and action_payload.action_type != "none":
-            rules_query = f"{action_payload.action_type} {action_payload.value}"
-            rules_results = self.vector_db.search(query=rules_query, category_filter="rules", limit=1)
-            if rules_results:
-                rag_chunks.append(f"DND RULE REFERENCE:\n{rules_results[0]['document']}")
-                print(f"[RAG] Injected D&D Rule Context: {rules_results[0]['metadata']['source_file']}")
-
         if lore_results:
             rag_chunks.append(f"PROSE INSPIRATION:\n{lore_results[0]['document']}")
-        
+            
+        location_lore_combined = "\n\n".join(rag_chunks)
+        if local_presence_block:
+            location_lore_combined += f"\n{local_presence_block}"
+            
         dm_system = self.dm_agent.compile_prompt(
-            location_lore="\n\n".join(rag_chunks),
-            system_update=mechanical_status
+            location_lore=location_lore_combined,
+            system_update=movement_status if movement_status else ""
         )
+        
+        dm_system = f"{char_sheet_block}\n\n{dm_system}"
+        
+        dm_system += """\n
+        CRITICAL RULES FOR MECHANICAL RESOLUTION:
+        1. If the player attempts a risky, uncertain, or challenging action, you must NOT resolve the outcome. You must immediately halt generation and output this exact tag: [ROLL: skill_name] (choose from the 18 official skills or raw attributes, e.g. [ROLL: stealth] or [ROLL: athletics]).
+        2. If the player gains or loses an item, or takes damage/healing, append the state update tag at the very end of your response:
+           - [ADD_ITEM: item_name]
+           - [REMOVE_ITEM: item_name]
+           - [TAKE_DAMAGE: amount]
+           - [HEAL_HP: amount]
+        """
+
         dm_messages = PromptBuilder.compile_messages(dm_system, [], self.chat_history)
         
-        full_response_chunks = []
+        yield from self._stream_and_intercept(dm_messages)
+
+    def _stream_and_intercept(self, dm_messages: List[Dict[str, str]]):
+        """Streams LLM generation, buffering and executing inline rolls and silent state updates."""
+        buffer = ""
+        in_tag = False
+        full_response_text = ""
+        
         for chunk in self.llm.generate_narrative_stream(dm_messages):
-            full_response_chunks.append(chunk)
-            yield chunk
+            for char in chunk:
+                if char == "[":
+                    in_tag = True
+                    buffer += char
+                elif char == "]":
+                    buffer += char
+                    in_tag = False
+                    
+                    tag_content = buffer.strip("[]")
+                    
+                    if tag_content.startswith("ROLL:"):
+                        skill = tag_content.split(":", 1)[1].strip().lower()
+                        print("\n")
+                        
+                        roll_result_str = self._execute_inline_roll(skill)
+                        print(roll_result_str)
+                        
+                        self.chat_history.append({"role": "assistant", "content": full_response_text})
+                        self.chat_history.append({
+                            "role": "user", 
+                            "content": f"[SYSTEM: Your d20 roll for {skill} was resolved. Roll outcome: {roll_result_str}. Describe the immediate consequence of this roll in character. Do not repeat this system message.]"
+                        })
+                        self.chat_history = TokenManager.prune_history(self.chat_history)
+                        
+                        char_sheet_block = self._get_active_character_sheet()
+                        
+                        vector = self.vector_db.embedder.get_embeddings([self.current_location_slug])[0]
+                        location_results = self.vector_db.search(query_vector=vector, category_filter="locations", limit=1)
+                        rag_chunks = [r["document"] for r in location_results if r["metadata"].get("meta_campaign_slug") == self.campaign_slug]
+                        
+                        dm_system = self.dm_agent.compile_prompt(location_lore="\n\n".join(rag_chunks))
+                        dm_system = f"{char_sheet_block}\n\n{dm_system}"
+                        dm_system += """\n
+                        CRITICAL RULES FOR MECHANICAL RESOLUTION:
+                        1. If the player attempts a risky, uncertain, or challenging action, you must NOT resolve the outcome. You must immediately halt generation and output this exact tag: [ROLL: skill_name].
+                        2. If the player gains or loses an item, or takes damage/healing, append the state update tag at the very end of your response:
+                           - [ADD_ITEM: item_name]
+                           - [REMOVE_ITEM: item_name]
+                           - [TAKE_DAMAGE: amount]
+                           - [HEAL_HP: amount]
+                        """
+                        
+                        new_messages = PromptBuilder.compile_messages(dm_system, [], self.chat_history)
+                        yield from self._stream_and_intercept(new_messages)
+                        return
+                        
+                    elif any(tag_content.startswith(act) for act in ["ADD_ITEM", "REMOVE_ITEM", "TAKE_DAMAGE", "HEAL_HP"]):
+                        self._update_character_state(buffer)
+                        buffer = ""
+                    else:
+                        yield buffer
+                        full_response_text += buffer
+                        buffer = ""
+                else:
+                    if in_tag:
+                        buffer += char
+                    else:
+                        yield char
+                        full_response_text += char
+                        
+        if buffer:
+            yield buffer
+            full_response_text += buffer
             
-        narrative_response = "".join(full_response_chunks)
-        self.chat_history.append({"role": "assistant", "content": narrative_response})
+        self.chat_history.append({"role": "assistant", "content": full_response_text})
         self.chat_history = TokenManager.prune_history(self.chat_history)
 
-    def initiate_combat(self) -> str:
-        self.set_state("COMBAT_PLAY")
-        self.chat_history.append({"role": "system", "content": "[COMBAT INITIATED! Enforcing turn order mechanics]"})
-        
-        self._execute_query("DELETE FROM combat_queue;")
-        
-        query = """
-            SELECT id, name, type, dexterity, initiative_bonus 
-            FROM characters 
-            WHERE hp > 0 AND (location_id = ? OR type = 'player')
-        """
-        combatants = self._execute_query(query, (self.current_location_slug,))
-        
-        rolled_combatants = []
-        for idx, (cid, name, char_type, dex, init_bonus) in enumerate(combatants):
-            roll = self.dnd_roll(20, init_bonus)
-            rolled_combatants.append({
-                "id": cid,
-                "name": name,
-                "type": char_type,
-                "roll": roll
-            })
-            
-        rolled_combatants.sort(key=lambda x: x["roll"], reverse=True)
-        self.combat_queue = rolled_combatants
-        self.current_turn_index = 0
-        
-        for turn, actor in enumerate(rolled_combatants):
-            self._execute_query(
-                "INSERT INTO combat_queue (actor_id, roll_result, turn_order) VALUES (?, ?, ?)",
-                (actor["id"], actor["roll"], turn)
-            )
-
-        queue_report = "\n=== INITIATIVE ORDER ===\n"
-        for idx, actor in enumerate(rolled_combatants):
-            queue_report += f"{idx+1}. {actor['name']} (Type: {actor['type']}) [Rolled: {actor['roll']}]\n"
-        queue_report += "========================\n"
-        print(queue_report)
-        return queue_report
+        self._run_referee_state_reconciliation()
 
     def set_state(self, new_state: str) -> None:
         self.state = new_state
         print(f"[Orchestrator State] Transitioned to -> {self.state}")
-
-    def process_combat_turn(self, player_action_text: Optional[str] = None) -> str:
-        if self.state != "COMBAT_PLAY":
-            return "Not currently in combat."
-
-        active_actor = self.combat_queue[self.current_turn_index]
-        print(f"\n[Turn: {self.current_turn_index + 1}] Active Combatant: {active_actor['name']}")
-
-        res = self._execute_query("SELECT * FROM characters WHERE id = ?", (active_actor["id"],))
-        stats_keys = ["id", "name", "type", "strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma", "hp", "max_hp", "ac", "initiative_bonus"]
-        actor_stats = dict(zip(stats_keys, res[0]))
-
-        if actor_stats["hp"] <= 0:
-            print(f"[Combat] {actor_stats['name']} is incapacitated. Skipping turn.")
-            self._advance_turn()
-            return f"{actor_stats['name']} is unconscious and cannot act."
-
-        mechanical_status = ""
-
-        if actor_stats["type"] == "player":
-            if not player_action_text:
-                return "Awaiting player turn input..."
-            
-            self.chat_history.append({"role": "user", "content": f"[Combat Turn: {actor_stats['name']}] {player_action_text}"})
-            
-            str_mod = (actor_stats["strength"] - 10) // 2
-            
-            opponents = self._execute_query("SELECT id, name, ac, hp FROM characters WHERE type = 'enemy' AND hp > 0 LIMIT 1")
-            if opponents:
-                opp_id, opp_name, opp_ac, opp_hp = opponents[0]
-                to_hit = self.dnd_roll(20, str_mod)
-                print(f"[Roll] Player rolled {to_hit} to hit vs. {opp_name}'s AC of {opp_ac}.")
-                
-                if to_hit >= opp_ac:
-                    damage = self.dnd_roll(8, str_mod)
-                    new_hp = max(0, opp_hp - damage)
-                    self._execute_query("UPDATE characters SET hp = ? WHERE id = ?", (new_hp, opp_id))
-                    mechanical_status = f"SYSTEM COMBAT UPDATE: player_warrior hits {opp_name} for {damage} damage! {opp_name} HP is now {new_hp}."
-                    if new_hp == 0:
-                        mechanical_status += f" {opp_name} has fallen in battle!"
-                else:
-                    mechanical_status = f"SYSTEM COMBAT UPDATE: player_warrior swings and misses {opp_name}."
-            else:
-                mechanical_status = "SYSTEM COMBAT UPDATE: No active enemies left in view."
-
-        else:
-            print(f"[Combat AI] Thinking turn for NPC: {actor_stats['name']}...")
-            opponents_desc = "player_warrior (HP: active, AC: 16)"
-            actor_system = self.actor_agent.compile_combat_prompt(actor_stats, opponents_desc, [])
-            
-            try:
-                response = ollama.chat(
-                    model=self.llm.model_name,
-                    messages=[{"role": "system", "content": actor_system}],
-                    format=CombatAction.model_json_schema(),
-                    options={"temperature": 0.0}
-                )
-                action_payload = CombatAction.model_validate_json(response["message"]["content"])
-                print(f"[Combat AI Output] Choice: {action_payload.action_detail} on {action_payload.target_id}")
-            except Exception as e:
-                action_payload = CombatAction(target_id="player_warrior", action_type="melee_attack", action_detail="attacks with claw")
-
-            if action_payload.action_type == "flee":
-                flee_roll = self.dnd_roll(20, (actor_stats["dexterity"] - 10) // 2)
-                if flee_roll >= 10:
-                    mechanical_status = f"SYSTEM COMBAT UPDATE: {actor_stats['name']} successfully flees from combat, running into the misty woods!"
-                    self.combat_queue.pop(self.current_turn_index)
-                    self.current_turn_index = max(0, self.current_turn_index - 1)
-                else:
-                    mechanical_status = f"SYSTEM COMBAT UPDATE: {actor_stats['name']} attempts to flee, but player_warrior blocks their escape!"
-            
-            else:
-                dex_mod = (actor_stats["dexterity"] - 10) // 2
-                player_stats = self._execute_query("SELECT id, name, ac, hp FROM characters WHERE type = 'player' LIMIT 1")[0]
-                p_id, p_name, p_ac, p_hp = player_stats
-                
-                to_hit = self.dnd_roll(20, dex_mod)
-                print(f"[Roll] {actor_stats['name']} rolled {to_hit} to hit vs. Player's AC of {p_ac}.")
-                
-                if to_hit >= p_ac:
-                    damage = self.dnd_roll(6, dex_mod)
-                    new_hp = max(0, p_hp - damage)
-                    self._execute_query("UPDATE characters SET hp = ? WHERE id = ?", (new_hp, p_id))
-                    mechanical_status = f"SYSTEM COMBAT UPDATE: {actor_stats['name']} performs '{action_payload.action_detail}' hitting player for {damage} damage! Player HP is now {new_hp}."
-                else:
-                    mechanical_status = f"SYSTEM COMBAT UPDATE: {actor_stats['name']} misses player with '{action_payload.action_detail}'."
-
-        dm_system = self.dm_agent.compile_prompt(location_lore="", system_update=mechanical_status)
-        dm_system += f"\nActive Turn: It was {actor_stats['name']}'s turn. Narrate their action: '{mechanical_status}' in descriptive style."
-        
-        pruned_history = self._compile_pruned_combat_history()
-        base_messages = PromptBuilder.compile_messages(dm_system, [], pruned_history)
-        
-        base_messages.append({
-            "role": "user", 
-            "content": f"[Referee] The mechanical action resolved as: '{mechanical_status}'. Dungeon Master, please narrate this turn's action in descriptive prose."
-        })
-        
-        narrative_response = self.llm.generate_narrative(base_messages)
-        narrative_response = narrative_response.replace("assistant\n", "").replace("assistant", "").strip()
-        
-        self.chat_history.append({
-            "role": "assistant", 
-            "content": f"[{actor_stats['name']}'s Turn] {narrative_response}",
-            "mechanical_summary": mechanical_status
-        })
-        
-        self._advance_turn()
-        self._check_combat_end()
-        
-        return narrative_response
-
-    def _advance_turn(self) -> None:
-        self.current_turn_index = (self.current_turn_index + 1) % len(self.combat_queue)
-
-    def _check_combat_end(self) -> None:
-        enemies_alive = self._execute_query("SELECT COUNT(*) FROM characters WHERE type = 'enemy' AND hp > 0")[0][0]
-        player_alive = self._execute_query("SELECT hp FROM characters WHERE type = 'player'")[0][0] > 0
-        
-        if enemies_alive == 0:
-            print("\n[Combat Over] All threats cleared! Victorious!")
-            self.set_state("NARRATIVE_PLAY")
-            self.chat_history.append({"role": "system", "content": "[Combat Ended. All enemies cleared.]"})
-        elif not player_alive:
-            print("\n[Combat Over] Player character has fallen. Game Over.")
-            self.set_state("NARRATIVE_PLAY")
-            self.chat_history.append({"role": "system", "content": "[Combat Ended. The player has died.]"})
-
-    def _compile_pruned_combat_history(self) -> List[Dict[str, str]]:
-        pruned_history = []
-        for turn in self.chat_history[-4:]:
-            if "mechanical_summary" in turn and turn["mechanical_summary"]:
-                pruned_history.append({
-                    "role": turn["role"],
-                    "content": f"Outcome of turn: {turn['mechanical_summary']}"
-                })
-            else:
-                pruned_history.append({
-                    "role": turn["role"],
-                    "content": turn["content"]
-                    
-                })
-        return pruned_history
 
     def _get_connected_locations(self) -> List[Dict[str, str]]:
         """Queries SQLite to fetch all connected nodes adjacent to the current location."""
@@ -547,8 +308,24 @@ class GameOrchestrator:
                 clean_id = conn["id"].replace(f"{self.campaign_slug}_", "").replace("_", " ")
                 if conn["id"].lower() in user_input_lower or conn["name"].lower() in user_input_lower or clean_id in user_input_lower:
                     old_loc = self.current_location_slug
-                    self.current_location_slug = conn["id"]
                     
+                    db_conn = get_db_connection(self.campaign_slug)
+                    cursor = db_conn.cursor()
+                    try:
+                        cursor.execute("""
+                            DELETE FROM characters 
+                            WHERE location_id = ? AND type != 'player' AND is_persistent = 0
+                        """, (old_loc,))
+                        db_conn.commit()
+                        purged_count = cursor.rowcount
+                        if purged_count > 0:
+                            print(f"[Engine State] Purged {purged_count} ephemeral NPCs from old location '{old_loc}'")
+                    except sqlite3.Error as e:
+                        print(f"[Engine Error] Failed to purge ephemeral NPCs: {e}")
+                    finally:
+                        db_conn.close()
+
+                    self.current_location_slug = conn["id"]
                     self._ensure_location_generated(conn["id"])
                     
                     return f"SYSTEM UPDATE: Player successfully moved from '{old_loc}' to '{conn['id']}' ({conn['name']}). You must narrate their departure, short journey, and physical arrival."
@@ -557,40 +334,278 @@ class GameOrchestrator:
             
         return None
 
+    def _get_player_name(self) -> str:
+        """Retrieves the active player character's name from SQLite."""
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM characters WHERE type = 'player' LIMIT 1")
+        res = cursor.fetchone()
+        conn.close()
+        return res[0] if res else "player_warrior"
+
+    def slugify(self, text: str) -> str:
+        text = text.lower().strip()
+        text = re.sub(r"[^\w\s-]", "", text)
+        return re.sub(r"[-\s]+", "_", text)
+
+    def _get_active_character_sheet(self) -> str:
+        """Queries SQLite and Markdown to compile the current character sheet and inventory."""
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name, strength, dexterity, constitution, intelligence, wisdom, charisma, hp, max_hp, ac, initiative_bonus 
+            FROM characters 
+            WHERE type = 'player' LIMIT 1
+        """)
+        char_row = cursor.fetchone()
+        conn.close()
+        
+        if not char_row:
+            return ""
+            
+        name, str_, dex, con, intel, wis, cha, hp, max_hp, ac, init_bonus = char_row
+        char_slug = self.slugify(name)
+        
+        inventory_items = []
+        try:
+            metadata, _ = self.md_manager.read_file("actors", f"{self.campaign_slug}_{char_slug}")
+            inventory_items = metadata.get("inventory", [])
+            if isinstance(inventory_items, str):
+                inventory_items = [i.strip() for i in inventory_items.split(",") if i.strip()]
+        except Exception:
+            inventory_items = ["Leather armor", "Short sword", "Stale bread"]
+            
+        inventory_str = ", ".join(inventory_items) if inventory_items else "Empty"
+        
+        sheet = f"""
+        [Active Character Sheet]
+        Name: {name}
+        Class/Race: Elf Ranger
+        HP: {hp}/{max_hp} | AC: {ac} | Initiative Bonus: +{init_bonus}
+        Attributes: STR:{str_} | DEX:{dex} | CON:{con} | INT:{intel} | WIS:{wis} | CHA:{cha}
+        Inventory: {inventory_str}
+        """
+        return inspect.cleandoc(sheet)
+
+    def _update_character_state(self, tag: str) -> None:
+        """Parses state tags like [ADD_ITEM: x] and updates SQLite and Markdown files on disk."""
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, hp, max_hp FROM characters WHERE type = 'player' LIMIT 1")
+        row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            return
+            
+        name, hp, max_hp = row
+        char_slug = self.slugify(name)
+        
+        tag = tag.strip("[]")
+        parts = tag.split(":", 1)
+        if len(parts) < 2:
+            conn.close()
+            return
+            
+        action, value = parts[0].strip().upper(), parts[1].strip()
+        
+        if action == "ADD_ITEM":
+            try:
+                metadata, content = self.md_manager.read_file("actors", f"{self.campaign_slug}_{char_slug}")
+                inventory = metadata.get("inventory", [])
+                if isinstance(inventory, str):
+                    inventory = [i.strip() for i in inventory.split(",") if i.strip()]
+                if value not in inventory:
+                    inventory.append(value)
+                metadata["inventory"] = inventory
+                self.md_manager.write_file("actors", f"{self.campaign_slug}_{char_slug}", metadata, content)
+                print(f"\n[Engine State] Item added to inventory: {value}")
+            except Exception as e:
+                print(f"Error adding item: {e}")
+                
+        elif action == "REMOVE_ITEM":
+            try:
+                metadata, content = self.md_manager.read_file("actors", f"{self.campaign_slug}_{char_slug}")
+                inventory = metadata.get("inventory", [])
+                if isinstance(inventory, str):
+                    inventory = [i.strip() for i in inventory.split(",") if i.strip()]
+                
+                inventory = [item for item in inventory if item.lower() != value.lower()]
+                metadata["inventory"] = inventory
+                self.md_manager.write_file("actors", f"{self.campaign_slug}_{char_slug}", metadata, content)
+                print(f"\n[Engine State] Item removed from inventory: {value}")
+            except Exception as e:
+                print(f"Error removing item: {e}")
+                
+        elif action == "TAKE_DAMAGE":
+            try:
+                dmg = abs(int(value))
+                new_hp = max(0, hp - dmg)
+                cursor.execute("UPDATE characters SET hp = ? WHERE name = ?", (new_hp, name))
+                conn.commit()
+                print(f"\n[Engine State] Player took {dmg} damage. HP: {new_hp}/{max_hp}")
+            except ValueError:
+                pass
+                
+        elif action == "HEAL_HP":
+            try:
+                heal = abs(int(value))
+                new_hp = min(max_hp, hp + heal)
+                cursor.execute("UPDATE characters SET hp = ? WHERE name = ?", (new_hp, name))
+                conn.commit()
+                print(f"\n[Engine State] Player healed for {heal} HP. HP: {new_hp}/{max_hp}")
+            except ValueError:
+                pass
+                
+        conn.close()
+
+    def _execute_inline_roll(self, skill: str) -> str:
+        """Executes a D&D d20 roll in Python, applying modifiers from the player's database sheet."""
+        player_name = self._get_player_name()
+        
+        SKILL_MAP = {
+            "athletics": "strength", "acrobatics": "dexterity", "sleight of hand": "dexterity", "stealth": "dexterity",
+            "arcana": "intelligence", "history": "intelligence", "investigation": "intelligence", "nature": "intelligence", "religion": "intelligence",
+            "animal handling": "wisdom", "insight": "wisdom", "medicine": "wisdom", "perception": "wisdom", "survival": "wisdom",
+            "deception": "charisma", "intimidation": "charisma", "performance": "charisma", "persuasion": "charisma"
+        }
+        
+        ability = SKILL_MAP.get(skill, skill)
+        allowed_columns = ["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"]
+        if ability not in allowed_columns:
+            ability = "dexterity"
+            
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT {ability} FROM characters WHERE name = ?", (player_name,))
+        res = cursor.fetchone()
+        conn.close()
+        
+        score = res[0] if res else 10
+        modifier = (score - 10) // 2
+        
+        import time
+        print(f"\n[Engine] Attempting roll for '{skill}' ({ability})... ", end="", flush=True)
+        time.sleep(0.4)
+        for _ in range(3):
+            print(".", end="", flush=True)
+            time.sleep(0.3)
+            
+        d20 = random.randint(1, 20)
+        total = d20 + modifier
+        
+        return f"Got {d20} + {modifier} ({ability} modifier) = {total}!"
+
+    def _run_referee_state_reconciliation(self) -> None:
+        """Invokes the Referee Agent silently to evaluate if a new actor was dynamically met."""
+        referee_system = """
+        You are the system referee. Analyze the recent conversational turn (user action and the DM description) to decide if a new character was introduced, met, or spawned in the scene.
+        
+        CRITICAL RULES:
+        1. If a new character is introduced, set action_type to 'spawn_npc' and populate 'spawned_npc'.
+        2. Set is_persistent to true ONLY for major recurring allies, named bosses, or significant quest-givers.
+        3. Set is_persistent to false for generic, non-crucial NPCs (shopkeepers, guards, low-importance enemies like generic goblins).
+        4. If no character is introduced, set action_type to 'none'.
+        """
+        
+        referee_history = self.chat_history[-2:]
+        compiled_referee = PromptBuilder.compile_messages(referee_system, [], referee_history)
+        
+        payload = self.llm.generate_structured_action(
+            messages=compiled_referee,
+            response_schema=GameActionPayload,
+            temperature=0.0
+        )
+        
+        if payload and payload.action_type == "spawn_npc" and payload.spawned_npc:
+            print(f"\n[Referee] Detected dynamic NPC introduction: '{payload.spawned_npc.name}' ({payload.spawned_npc.type})")
+            self._handle_dynamic_npc_spawn(payload.spawned_npc)
+
+    def _handle_dynamic_npc_spawn(self, npc_details) -> None:
+        """Saves met NPCs. Persistent ones get Markdown + SQLite profiles, generic ones are SQLite-only."""
+        name = npc_details.name
+        char_type = npc_details.type
+        is_persistent = 1 if npc_details.is_persistent else 0
+        backstory = npc_details.brief_backstory or f"A generic {char_type} met in the campaign."
+        template_id = npc_details.template_id
+        
+        if is_persistent == 1:
+            strength, dexterity, constitution = 14, 12, 13
+            intelligence, wisdom, charisma = 10, 12, 14
+            hp, max_hp, ac = 12, 12, 13
+        else:
+            strength, dexterity, constitution = 10, 10, 10
+            intelligence, wisdom, charisma = 10, 10, 10
+            hp, max_hp, ac = 6, 6, 10
+            
+        if template_id:
+            if "goblin" in template_id.lower():
+                strength, dexterity, constitution = 8, 14, 10
+                intelligence, wisdom, charisma = 10, 8, 8
+                hp, max_hp, ac = 7, 7, 12
+            elif "giant_rat" in template_id.lower():
+                strength, dexterity, constitution = 7, 15, 11
+                intelligence, wisdom, charisma = 2, 10, 4
+                hp, max_hp, ac = 7, 7, 12
+
+        initiative_bonus = (dexterity - 10) // 2
+        
+        conn = get_db_connection(self.campaign_slug)
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+            INSERT INTO characters (name, type, location_id, strength, dexterity, constitution, intelligence, wisdom, charisma, hp, max_hp, ac, initiative_bonus, is_persistent, template_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                name, char_type, self.current_location_slug,
+                strength, dexterity, constitution, intelligence, wisdom, charisma,
+                hp, hp, ac, initiative_bonus, is_persistent, template_id
+            ))
+            conn.commit()
+            print(f"[Engine State] Registered NPC '{name}' in SQLite under '{self.current_location_slug}'")
+        except sqlite3.Error as e:
+            print(f"[Engine Error] SQLite dynamic insertion failed: {e}")
+        finally:
+            conn.close()
+            
+        if is_persistent == 1:
+            char_slug = self.slugify(name)
+            filename = f"{self.campaign_slug}_{char_slug}"
+            
+            actor_metadata = {
+                "id": char_slug,
+                "campaign_slug": self.campaign_slug,
+                "name": name,
+                "type": char_type,
+                "is_persistent": True
+            }
+            
+            actor_content = (
+                f"# Actor Sheet: {name}\n\n"
+                f"**Role:** {char_type.capitalize()} | **Location:** {self.current_location_slug}\n\n"
+                f"## Backstory & Background Lore\n{backstory}\n\n"
+                f"## Determined Stats\n"
+                f"- STR: {strength} | DEX: {dexterity} | CON: {constitution}\n"
+                f"- INT: {intelligence} | WIS: {wisdom} | CHA: {charisma}\n\n"
+                f"## Combat Profile\n"
+                f"- **HP:** {hp}/{max_hp}\n"
+                f"- **AC:** {ac}\n"
+            )
+            
+            try:
+                self.md_manager.write_file(
+                    category="actors",
+                    filename=filename,
+                    metadata=actor_metadata,
+                    content=actor_content
+                )
+                self.vector_db.upsert_markdown_file(category="actors", filename=filename)
+                print(f"[Engine State] Wrote detailed persistent character Markdown profile: '{filename}.md'")
+            except Exception as e:
+                print(f"[Engine Error] Failed to write persistent Markdown profile: {e}")
+
 if __name__ == "__main__":
     campaign = "brindlemark_dragon_spine"
     
-    conn = get_db_connection(campaign)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM characters")
-    
-    cursor.execute("""
-    INSERT INTO characters (id, name, type, strength, dexterity, constitution, intelligence, wisdom, charisma, hp, max_hp, ac, initiative_bonus)
-    VALUES (1, 'player_warrior', 'player', 16, 12, 14, 10, 12, 10, 20, 20, 16, 1)
-    """)
-    cursor.execute("""
-    INSERT INTO characters (id, name, type, strength, dexterity, constitution, intelligence, wisdom, charisma, hp, max_hp, ac, initiative_bonus)
-    VALUES (2, 'Gruk the Rusty', 'enemy', 8, 14, 10, 7, 8, 5, 8, 8, 12, 2)
-    """)
-    conn.commit()
-    conn.close()
-
     engine = GameOrchestrator(campaign_slug=campaign)
-
-    print("\n=======================================================")
-    print("          TEST PHASE 1: NARRATIVE LOOP")
-    print("=======================================================")
-    exp_reply = engine.process_narrative_turn("I enter the misty tree-line of the Whispering Woods, looking for shelter.")
-    print(f"\nDM Narration:\n{exp_reply}")
-
-    print("\n=======================================================")
-    print("          TEST PHASE 2: INITIATING COMBAT")
-    print("=======================================================")
-    engine.initiate_combat()
-
-    p_attack = "I draw my broadsword and swing it hard at Gruk the Rusty!"
-    turn_1_narrative = engine.process_combat_turn(player_action_text=p_attack)
-    print(f"\nDungeon Master Narration:\n{turn_1_narrative}")
-
-    turn_2_narrative = engine.process_combat_turn()
-    print(f"\nDungeon Master Narration:\n{turn_2_narrative}")
+    print(f"Orchestrator successfully initialized for campaign: {engine.campaign_slug}")
