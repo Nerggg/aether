@@ -68,6 +68,12 @@ class CharacterCreator:
             "backstory": None
         }
 
+        try:
+            _, content = self.md_manager.read_file("campaigns", f"{self.campaign_slug}_info")
+            self.campaign_context = content.strip()
+        except Exception:
+            self.campaign_context = "A standard fantasy world with typical D&D factions and regions."
+
     @staticmethod
     def slugify(text: str) -> str:
         text = text.lower().strip()
@@ -130,9 +136,16 @@ class CharacterCreator:
 
             active_persona = f"""
             You are the Character Creation Guide. Help the player build a D&D character.
-            
+
             {DND_RULES_TEXT}
-            
+
+            ACTIVE CAMPAIGN LORE CONTEXT:
+            Below is the setting, factions, and storyline of the active campaign where this character will play. 
+            Use this context to draft custom, highly immersive backstory and background suggestions that tie the character directly to this world, its starting patron, and its environmental hazards:
+            --------------------------------------------------
+            {self.campaign_context}
+            --------------------------------------------------
+
             Here is the current status of the character checklist:
             - name: {'COMPLETED ({})'.format(self.checklist['name']) if self.checklist['name'] else 'PENDING'}
             - race: {'COMPLETED ({})'.format(self.checklist['race']) if self.checklist['race'] else 'PENDING'}
@@ -141,6 +154,7 @@ class CharacterCreator:
 
             INSTRUCTIONS:
             - Focus on asking questions to resolve the PENDING traits. Ask about ONE trait at a time.
+            - When suggesting backstory options (A, B, C), they MUST be deeply integrated into the ACTIVE CAMPAIGN LORE CONTEXT.
             - You must ALWAYS present your questions as a multiple-choice selection structured EXACTLY in this format:
               A) [Suggestion 1]
               B) [Suggestion 2]
