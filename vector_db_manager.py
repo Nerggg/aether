@@ -226,7 +226,6 @@ class VectorDBManager:
 
 if __name__ == "__main__":
     db_mgr = VectorDBManager()
-    db_mgr.index_directory("rules")
     db_mgr.index_directory("lore")
 
     # print("\n--- Phase 1: Indexing Files ---")

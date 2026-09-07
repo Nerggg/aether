@@ -7,7 +7,6 @@ class MarkdownManager:
     def __init__(self, base_dir: str = "data"):
         self.base_dir = Path(base_dir)
         self.directories = {
-            "rules": self.base_dir / "rules",
             "lore": self.base_dir / "lore",
             "campaigns": self.base_dir / "campaigns",
             "locations": self.base_dir / "locations",
