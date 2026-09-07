@@ -1,6 +1,6 @@
 # Aether: Stateful LLM Orchestrator for Locally Hosted Tabletop RPGs
 
-Aether is a local, stateful multi-agent orchestrator designed to run D&D campaigns using a single lightweight local LLM (such as Llama 3.2 3B). The project establishes a robust system boundary by combining structured relational databases (SQLite) for numeric game states (such as health, inventory, and initiative orders) with semantic vector databases (ChromaDB) for narrative context and rules retrieval.
+Aether is a local, stateful multi-agent orchestrator designed to run D&D campaigns using a single lightweight local LLM (such as Llama 3.2 3B). The project establishes a robust system boundary by combining structured relational databases (SQLite) for numeric game states (such as health, inventory, and initiative orders) with semantic vector databases (ChromaDB) for narrative context.
 
 ---
 
@@ -46,24 +46,6 @@ Aether avoids the common pitfalls of naive LLM wrappers by separating **narrativ
 
 ---
 
-## Directory Structure
-
-```text
-.
-├── db.py                 # Dynamic SQLite save-slot manager
-├── md_manager.py         # Directory and Markdown manager with YAML front-matter parsing
-├── vector_db_manager.py  # ChromaDB ingestion, recursive directory indexing, and mxbai-embed RAG
-├── llm_manager.py        # Ollama API wrapper, Pydantic schemas, and structured JSON parsing
-├── agents.py             # Decoupled prompt templates and compilers for DM, Environment, and Actor agents
-├── campaign_creator.py   # Interactive campaign creator with dynamic checklist tracking
-├── character_creator.py  # D&D character generator with rules constraints and SQLite registration
-├── orchestrator.py       # Core game controller managing Narrative Mode, Combat Mode, and turn tracking
-├── main.py               # Master terminal-based game launcher
-└── README.md             # Documentation
-```
-
----
-
 ## How to Run the Project
 
 Follow these steps to set up, index, and launch the game locally:
@@ -84,24 +66,7 @@ source venv/bin/activate  # On Windows use: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Clone and Import the D&D Rulebook (optional)
-Aether supports bulk-indexing of open-source rulebooks. Clone the official, community-converted D&D 5e System Reference Document (SRD) directly into your rules directory:
-```bash
-mkdir -p data/rules
-cd data/rules
-git clone https://github.com/downfallx/dnd-5e-srd-markdown
-# Clean up git files to keep directories clean
-cd dnd-5e-srd-markdown && rm -rf .git
-cd ../../..
-```
-
-### 4. Bulk Index the Rules and Lore Database
-Run the vector database manager to recursively scan the newly cloned rulebook subdirectories (such as `spells`, `monsters`, and `mechanics`), split them by headings, and load them into ChromaDB:
-```bash
-python3 vector_db_manager.py
-```
-
-### 5. Launch the Master Game Launcher
+### 3. Launch the Master Game Launcher
 Launch the console interface to start your campaign creation, build your protagonist, and begin active play:
 ```bash
 python3 main.py
