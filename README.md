@@ -13,14 +13,20 @@ Aether avoids the common pitfalls of naive LLM wrappers by separating **narrativ
                      │
                      ▼
           ┌───────────────────┐
-          │   Orchestrator    │◄───► [ Vector DB / RAG ] (ChromaDB / mxbai-embed-large)
-          │  (State Router)   │      - Locations, rules, lore
+          │   Orchestrator    │◄───► [ Vector DB / RAG ] (ChromaDB + bge-small-en-v1.5)
+          │  (State Router)   │
           └─────────┬─────────┘
-                    │ (Generates Narrative & State Payload)
+                    │ (Generates Narrative & State Updates)
                     ▼
           ┌───────────────────┐
-          │ State Reconciler  │◄───► [ Relational DB ] (SQLite Campaign-Specific Slot)
-          │  (JSON Parser)    │      - Characters, inventories, combat queue
+          │ State Reconciler  │◄───► [ Relational DB ] (SQLite)
+          │  (JSON Parser)    │
+          └─────────┬─────────┘
+                    │
+                    ▼
+          ┌───────────────────┐
+          │ Markdown Manager  │◄───► [ File System Storage ] (.md + YAML Front-Matter)
+          │ (Profile Tracker) │
           └─────────┬─────────┘
                     │
                     ▼
@@ -29,13 +35,14 @@ Aether avoids the common pitfalls of naive LLM wrappers by separating **narrativ
 
 ### Key Technical Achievements
 
-* **Relational State Continuity:** The architecture uses a dynamic save-slot paradigm where each campaign lives in its own isolated filesystem directory (e.g., `data/campaigns/{campaign_slug}/`) containing its own private SQLite database (`game.db`). This ensures data isolation, prevents cross-campaign data pollution, and allows users to backup, share, or delete entire campaign states cleanly by moving directories.
-* **Resource-Optimized Hybrid RAG:** Running multiple models locally often leads to GPU VRAM contention. Aether handles this by routing both text generation (`llama3.2`) and embedding vector generation (`mxbai-embed-large`) through a single local Ollama server process, which schedules resources efficiently. It applies semantic RAG with metadata filtering, querying only specific subsets (such as `rules`, `locations`, or `lore`) based on the current game phase, which keeps the token footprint within a highly responsive 4,000-token window.
-* **Grammar-Constrained Asset Generation:** Aether leverages Ollama's native JSON mode and Pydantic schema validation to force the local model's GPU token output loop to strictly conform to structural schemas. This guarantees deterministic formatting during campaign synthesis, character creation, and combat evaluations thus eliminating JSON parsing errors or schema mismatches even at high temperatures.
-* **Decoupled Agent Persona Engine:** Instead of trying to force a single prompt to manage the entire world, Aether splits responsibilities into three logical, context-swapping agents:
-  1. *Dungeon Master (DM) Agent:* Handles chronological world narration, descriptions, and rules refereeing, but is strictly forbidden from speaking for characters.
-  2. *Environment Agent:* Evaluates physical object interactions, room attributes, and weather changes, returning structured updates.
-  3. *Actor Agent (NPCs/Enemies):* Swaps in character sheet statistics from SQLite and distinct behavioral profiles from Markdown to execute roleplay dialogue or tactical combat actions.
+* **Resource-Optimized Hybrid RAG:** Running multiple models locally can cause high VRAM contention. Aether solves this by dividing tasks: text generation is handled by `llama3.2` via Ollama, while embeddings are processed entirely *in-process* using `sentence-transformers` with the lightweight `BAAI/bge-small-en-v1.5` model. This split execution prevents embedding searches from blocking Ollama's generation queue and allows fast semantic lookup within a tight token footprint.
+* **State-Split Storage Architecture:** Instead of forcing highly qualitative or highly structured data into one unfitted storage type, Aether divides states by their native structures:
+  1. *Relational Layer (SQLite):* Handles quantitative game states that require strict constraints (such as base attributes, health pools, armor class, and physical location coordinates).
+  2. *Document Layer (Markdown with YAML):* Handles flexible, unstructured data (such as rich character backgrounds, active inventories, and descriptive room properties). This prevents database schema bloat while keeping profiles easily editable.
+* **Decoupled Persona Engine:** Rather than overloading a single prompt to manage the entire simulation, Aether isolates responsibilities:
+  1. *Dungeon Master (DM) Agent:* Generates chronological narrative descriptions and scenery but is strictly forbidden from speaking directly for actors.
+  2. *Actor Agent:* Swaps in character stats from SQLite and unique behavioral profiles from Markdown to execute immersive, in-character dialogues and tactical actions.
+  3. *State Router:* A procedural state machine that coordinates spatial movement, JIT location descriptions, and validates gameplay integrity.
 
 ---
 
@@ -104,28 +111,3 @@ python3 main.py
 * **Conversational World-Building:** Use the interactive creation terminals to consult with the AI. Type `complete` (or let the dynamic checklist auto-complete) to generate and index your custom setting files on disk and SQLite.
 * **Check Status (/ Commands):** At any point during active narrative exploration, you can bypass the LLM and query the database directly for exact stat values by typing `/stats` or `/inventory` in the console.
 * **Combat Mode Initiation:** Typing words like `attack` or `combat` will prompt the system to scan your current coordinates. If active enemies are present in SQLite at your location, the engine automatically transitions to turn-based Combat Mode.
-
----
-
-## Roadmap for Future Development
-
-The following architectural updates are designed to further elevate Aether's systems design:
-
-### 1. Contextual Feasibility: Detecting and Rejecting Illogical Player Inputs
-* **The Goal:** Prevent players from performing actions that make no logical or physical sense in their active surroundings (such as trying to *"attack an undead skeleton"* while celebrating at a peaceful festival inside a village tavern).
-* **The System Implementation:** 
-  1. Expand the existing `GameActionPayload` Pydantic schema in `llm_manager.py` to include `is_contextually_feasible: bool` and an optional `rejection_reason: str`.
-  2. The Referee Agent will analyze the user input against the recent history. If the action is contextually impossible, it sets `is_contextually_feasible` to `False` and details the failure.
-  3. The State Router in `orchestrator.py` intercepts this flag, bypasses SQLite updates entirely, and passes the rejection reason directly to the DM Agent.
-  4. The DM Agent narrates the player's physical or social failure (e.g., describing the awkward silence of the tavern patrons as the player draws their sword against imaginary phantoms).
-
-### 2. State-Persistence: Conversational History Serialization & Custom Openings
-* **The Goal:** Fully preserve active conversation history across application restarts, preventing the DM from "forgetting" the active scene and defaulting back to a generic opening.
-* **The System Implementation:**
-  * **Short-Term Memory Disk Serialization:** Every time a turn resolves, serialize `self.chat_history` directly to `data/campaigns/{campaign_slug}/chat_history.json` on disk.
-  * **On-Demand Deserialization:** When `GameOrchestrator` initializes, search for this save file. If present, deserialize and load it into RAM.
-  * **Dynamic Campaign-Specific Intros:** Completely eliminate the generic `"I open my eyes..."` startup prompt in `main.py`. If `chat_history.json` is empty, read the campaign profile (`campaign_info.md`) to extract the custom `setting_description` and `starting_quest_hook`. Have the DM Agent generate a fully custom, lore-accurate introductory sequence on the first run.
-
-### 3. Rules & Lore Ingestion Segregation
-* **The Goal:** Implement a dynamic indexer call inside `vector_db_manager.py` for `/data/lore/`. 
-* **The System Implementation:** Configure the recursive directory crawler (`index_directory`) to crawl a dedicated `/data/lore/` folder. This allows developers to drag-and-drop fantasy novels (like *The Lord of the Rings* converted to markdown) directly into the database. By separating the rules database (`data/rules/`) from the narrative database (`data/lore/`), the orchestrator can target its RAG queries using `category_filters`, keeping mechanical rules and colorful prose inspirations entirely segregated to prevent token context pollution.
