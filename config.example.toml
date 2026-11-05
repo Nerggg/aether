@@ -1,0 +1,77 @@
+# Aether configuration.
+#
+# Copy this file to `config.toml` and change only what you need.
+# Anything you leave out uses the default shown here.
+
+[models]
+# Ollama model used for every role unless overridden below.
+default = "llama3.2"
+
+# Uncomment a line to give one role its own model.
+# dm = "llama3.2"          # narration and opening scene
+# options = "llama3.2"     # action menu generation
+# judge = "llama3.2"       # custom-action feasibility check
+# referee = "llama3.2"     # structured extraction (new NPCs, beat progress, metadata)
+# compaction = "llama3.2"  # summarising old history
+# creation = "llama3.2"    # guide chat in campaign/character creation
+
+[temperature]
+# Creative roles can be warm; structured roles should stay near 0.
+dm = 0.7
+options = 0.5
+judge = 0.0
+referee = 0.0
+compaction = 0.3
+creation = 0.7
+
+[ollama]
+host = "http://localhost:11434"
+# Context window sent on every call. Larger = remembers more but slower on CPU.
+# 4096-6144 suits a CPU-only laptop; raise it if you have a GPU.
+num_ctx = 6144
+keep_alive = "30m"
+# Maximum length of one DM reply in tokens. 0 = unlimited.
+narration_max_tokens = 500
+
+[embedding]
+model_name = "BAAI/bge-small-en-v1.5"
+# Added to search queries only. This is model-specific: change it together with
+# model_name. Use "" for models that need no prefix.
+query_prefix = "Represent this sentence for searching relevant passages: "
+document_prefix = ""
+# "cpu" keeps GPU memory free for Ollama. Use "cuda" or "mps" if you prefer.
+device = "cpu"
+
+[rag]
+enabled = true
+# How many past exchanges to recall per turn.
+top_k = 2
+# Matches farther than this are ignored. Lower = stricter.
+max_distance = 0.45
+
+[memory]
+# Tokens reserved for the story summary plus the raw recent messages.
+history_budget_tokens = 3000
+# Compact when raw messages exceed this share of the budget.
+compaction_trigger_ratio = 0.7
+# Compact anyway once this many raw messages pile up.
+max_uncompacted_messages = 20
+# Messages kept word-for-word after a compaction.
+keep_recent_messages = 6
+summary_max_tokens = 400
+# Messages shown when you continue a saved campaign.
+resume_display_messages = 6
+
+[gameplay]
+# Generated options per turn. A "write your own action" choice is always added.
+num_options = 3
+max_option_words = 8
+# Custom actions rejected in a row before the menu is shown again.
+max_consecutive_rejections = 2
+# Turns without story progress before the world starts applying pressure.
+drift_threshold_turns = 6
+story_beats_min = 4
+story_beats_max = 6
+
+[paths]
+data_dir = "data"

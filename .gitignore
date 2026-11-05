@@ -2,3 +2,4 @@ aether_game.db
 venv/
 __pycache__/
 data/
+config.toml
