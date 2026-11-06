@@ -127,14 +127,6 @@ class PathsConfig:
         return Path(self.data_dir) / "campaigns"
 
     @property
-    def actors_dir(self) -> Path:
-        return Path(self.data_dir) / "actors"
-
-    @property
-    def locations_dir(self) -> Path:
-        return Path(self.data_dir) / "locations"
-
-    @property
     def vector_db_dir(self) -> Path:
         return Path(self.data_dir) / "vector_db"
 
