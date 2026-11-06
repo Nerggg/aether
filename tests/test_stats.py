@@ -1,6 +1,6 @@
 import pytest
 
-from stats import (
+from aether.logic.stats import (
     ABILITIES,
     CLASSES,
     DIFFICULTY_DC,

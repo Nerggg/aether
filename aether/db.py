@@ -21,8 +21,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from config import get_config
-from models import (
+from aether.config import get_config
+from aether.models import (
     BEAT_CONDITIONS,
     BEAT_STATUSES,
     CHARACTER_STATUSES,

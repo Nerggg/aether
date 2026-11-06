@@ -2,14 +2,14 @@ import sqlite3
 
 import pytest
 
-from db import (
+from aether.db import (
     SCHEMA_VERSION,
     CampaignExistsError,
     GameDB,
     SchemaVersionError,
     slugify,
 )
-from models import CampaignInfo, Character, StoryBeat, Summary
+from aether.models import CampaignInfo, Character, StoryBeat, Summary
 
 
 @pytest.fixture

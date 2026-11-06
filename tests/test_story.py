@@ -1,7 +1,7 @@
 import pytest
 
-from models import StoryBeat
-from story import (
+from aether.models import StoryBeat
+from aether.logic.story import (
     DbWorldView,
     DriftLevel,
     build_story_block,
@@ -138,10 +138,10 @@ def test_invalid_conditions():
 # --- adapter over the real database (skipped when db.py isn't importable) ----------------------
 
 def test_db_world_view_against_real_database(tmp_path):
-    pytest.importorskip("db")
-    from db import GameDB
-    from models import CampaignInfo  # noqa: F401  (ensures real models are in use)
-    from models import Character
+    pytest.importorskip("aether.db")
+    from aether.db import GameDB
+    from aether.models import CampaignInfo  # noqa: F401  (ensures real models are in use)
+    from aether.models import Character
 
     game = GameDB.create("world_view", campaigns_dir=tmp_path)
     try:
@@ -169,8 +169,8 @@ def test_db_world_view_against_real_database(tmp_path):
 
 
 def test_db_world_view_with_no_player(tmp_path):
-    pytest.importorskip("db")
-    from db import GameDB
+    pytest.importorskip("aether.db")
+    from aether.db import GameDB
 
     game = GameDB.create("empty_world", campaigns_dir=tmp_path)
     try:

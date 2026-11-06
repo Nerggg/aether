@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from config import (
+from aether.config import (
     ROLES,
     Config,
     ConfigError,
@@ -24,7 +24,7 @@ def test_defaults_are_valid():
 
 def test_missing_default_file_uses_defaults(tmp_path, monkeypatch):
     monkeypatch.delenv("AETHER_CONFIG", raising=False)
-    monkeypatch.setattr("config.DEFAULT_CONFIG_PATH", tmp_path / "does_not_exist.toml")
+    monkeypatch.setattr("aether.config.DEFAULT_CONFIG_PATH", tmp_path / "does_not_exist.toml")
     assert load_config() == Config()
 
 

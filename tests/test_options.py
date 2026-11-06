@@ -1,6 +1,6 @@
 import pytest
 
-from options import (
+from aether.logic.options import (
     CATEGORY_POOLS,
     CONVERSATION,
     EXPLORATION,
@@ -159,7 +159,7 @@ def test_complete_does_not_mutate_fallbacks():
 
 
 def test_fallback_skills_are_valid():
-    from stats import normalize_skill
+    from aether.logic.stats import normalize_skill
     for opt in FALLBACK_OPTIONS.values():
         assert opt.skill is None or normalize_skill(opt.skill) == opt.skill
         assert len(opt.text.split()) <= 8

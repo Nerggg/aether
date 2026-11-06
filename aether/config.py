@@ -9,7 +9,7 @@ want to change. Set the AETHER_CONFIG environment variable to load a config
 file from somewhere else.
 
 Usage:
-    from config import get_config
+    from aether.config import get_config
     cfg = get_config()
     model = cfg.models.for_role("dm")
 """
@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
 CONFIG_ENV_VAR = "AETHER_CONFIG"
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.toml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
 
 # Every LLM job in the game. Each can use its own model and temperature.
 ROLES = ("dm", "options", "judge", "referee", "compaction", "creation")
@@ -266,7 +266,7 @@ def load_config(path: Optional[os.PathLike] = None) -> Config:
     """Load and validate the config.
 
     If `path` (or the AETHER_CONFIG env var) is given, the file must exist.
-    Otherwise config.toml next to this module is used if present, and plain
+    Otherwise config.toml in the project root is used if present, and plain
     defaults if not.
     """
     explicit = path or os.environ.get(CONFIG_ENV_VAR)

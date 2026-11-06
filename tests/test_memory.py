@@ -1,5 +1,5 @@
-from config import MemoryConfig
-from memory import (
+from aether.config import MemoryConfig
+from aether.logic.memory import (
     CONTINUES_MARKER,
     MESSAGE_OVERHEAD_TOKENS,
     assemble_prompt,
@@ -13,7 +13,7 @@ from memory import (
     total_tokens,
     trim_to_budget,
 )
-from models import Message, Summary
+from aether.models import Message, Summary
 
 
 def msgs(roles, content="x", start_id=1):

@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Any, Container, Optional, Protocol
 
-from models import StoryBeat
+from aether.models import StoryBeat
 
 
 class DriftLevel(IntEnum):

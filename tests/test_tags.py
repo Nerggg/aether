@@ -1,6 +1,6 @@
 import pytest
 
-from tags import MAX_TAG_LENGTH, Tag, TagParser, parse_amount, parse_tags
+from aether.logic.tags import MAX_TAG_LENGTH, Tag, TagParser, parse_amount, parse_tags
 
 
 def stream(text, size):

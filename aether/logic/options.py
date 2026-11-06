@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from stats import normalize_skill
+from aether.logic.stats import normalize_skill
 
 EXPLORATION = "exploration"
 CONVERSATION = "conversation"

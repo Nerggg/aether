@@ -13,8 +13,8 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
-from config import MemoryConfig
-from models import Message, Summary
+from aether.config import MemoryConfig
+from aether.models import Message, Summary
 
 MESSAGE_OVERHEAD_TOKENS = 4   # role markers and separators per message
 MIN_MESSAGES_TO_COMPACT = 4   # never run a summary call for a tiny slice
