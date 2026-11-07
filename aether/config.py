@@ -78,7 +78,7 @@ class OllamaConfig:
     host: str = "http://localhost:11434"
     num_ctx: int = 6144               # context window passed on every call
     keep_alive: str = "30m"           # how long Ollama keeps the model loaded
-    narration_max_tokens: int = 500   # cap on one DM reply; 0 = unlimited
+    narration_max_tokens: int = 320   # cap on one DM reply; 0 = unlimited
 
 
 @dataclass

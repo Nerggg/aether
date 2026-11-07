@@ -2,6 +2,10 @@ import pytest
 
 from aether.logic.tags import MAX_TAG_LENGTH, Tag, TagParser, parse_amount, parse_tags
 
+def test_placeholder_values_are_swallowed():
+    text, tags = parse_tags("Fine. [ADD_ITEM: None][TAKE_DAMAGE: N/A][HEAL_HP: null] Done.")
+    assert tags == []
+    assert text == "Fine.  Done."
 
 def stream(text, size):
     """Feed text in chunks of `size` and return (shown text, tags)."""

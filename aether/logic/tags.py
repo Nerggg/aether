@@ -29,6 +29,7 @@ from typing import List, Optional, Sequence, Tuple
 
 DEFAULT_TAGS = ("ADD_ITEM", "REMOVE_ITEM", "TAKE_DAMAGE", "HEAL_HP")
 MAX_TAG_LENGTH = 80
+NOOP_VALUES = frozenset({"none", "null", "nil", "n/a", "na", "nothing", "-", "\u2014"})
 
 
 @dataclass(frozen=True)
@@ -79,10 +80,10 @@ class TagParser:
                 self._buf += ch
                 if ch == "]":
                     tag = self._match(self._buf)
-                    if tag:
-                        tags.append(tag)
-                    else:
+                    if tag is None:
                         out.append(self._buf)
+                    elif tag.value.strip().lower() not in NOOP_VALUES:
+                        tags.append(tag)
                     self._buf = ""
                 elif not self._could_be_tag(self._buf):
                     out.append(self._buf)
