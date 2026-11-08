@@ -15,6 +15,7 @@ from aether.logic.options import (
     parse_choice,
     sanitize_options,
     select_categories,
+    apply_default_skills,
 )
 
 
@@ -198,3 +199,18 @@ def test_parse_choice_valid(raw, expected):
 @pytest.mark.parametrize("raw", ["0", "5", "-1", "two", "I attack the guard", "", "1 2", "3rd"])
 def test_parse_choice_invalid(raw):
     assert parse_choice(raw, 3) is None
+
+def test_clean_does_not_leave_a_dangling_end():
+    assert clean_option_text("Tell Mother Hesk to get us off the ferry quickly", 8) == "Tell Mother Hesk"
+    assert clean_option_text("Back away slowly", 8) == "Back away slowly"
+
+
+def test_default_skills_fill_gaps_only():
+    opts = [ActionOption("Sneak", None, "cautious"), ActionOption("Hide", "stealth", "cautious"),
+            ActionOption("Ask", None, "probing"), ActionOption("Go", None, "story")]
+    assert [o.skill for o in apply_default_skills(opts)] == ["perception", "stealth", None, None]
+
+def test_firm_replaces_confrontational_and_never_rolls_by_default():
+    assert "firm" in CATEGORY_POOLS[CONVERSATION]
+    assert "confrontational" not in CATEGORY_POOLS[CONVERSATION]
+    assert apply_default_skills([ActionOption("Demand answers", None, "firm")])[0].skill is None

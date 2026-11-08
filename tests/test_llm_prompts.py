@@ -166,18 +166,6 @@ def test_judge_prompt_without_beat_skips_beat_field():
 
 # --- compaction, beats, location ---------------------------------------------------------------------------
 
-def test_compaction_prompt():
-    msgs = prompts.compaction_messages("STORY SO FAR:\nOld.", "Aria: hi\nDM: hello", "Aria", 300)
-    assert "at most 300 words" in msgs[0]["content"]
-    assert "Do not record HP, inventory or the current location" in msgs[0]["content"]
-    assert "EXISTING SUMMARY:\nSTORY SO FAR:\nOld." in msgs[1]["content"]
-    assert "NEW EVENTS:\nAria: hi" in msgs[1]["content"]
-
-
-def test_compaction_prompt_with_no_previous_summary():
-    assert "(none yet)" in prompts.compaction_messages("", "x", "Aria", 300)[1]["content"]
-
-
 def test_beats_prompt_lists_real_location_ids_and_counts():
     msgs = prompts.beats_messages(CAMPAIGN, [FERRY, CAUSEWAY], 4, 6)
     system = msgs[0]["content"]
@@ -197,20 +185,44 @@ def test_options_prompt_example_carries_category_labels():
     assert '"category":"story"' in system and "label in square brackets" in system
 
 
-def test_opening_limits_the_cast_and_length():
+def test_opening_limits_the_cast_style_and_length():
     user = prompts.opening_messages(CAMPAIGN, PLAYER, [], FERRY)[1]["content"]
-    assert "only named characters in the scene are Mother Hesk" in user
+    assert "only named character in the scene is Mother Hesk." in user
+    assert "second person, present tense" in user
     assert "2 short paragraphs" in user
     bare = CampaignInfo(name="N", slug="n", setting_description="s", primary_threat="t", starting_quest_hook="h")
     assert "Do not name any character" in prompts.opening_messages(bare, PLAYER, [], FERRY)[1]["content"]
 
 
-def test_compaction_prompt_has_example_and_forbids_retelling():
-    system = prompts.compaction_messages("", "x", "Aria", 100)[0]["content"]
-    assert "do not retell" in system and '"key_npcs"' in system and "Dessa" in system
+def test_opening_keeps_the_patron_role_separate():
+    from dataclasses import replace
+    camp = replace(CAMPAIGN, starting_patron="Mother Hesk, the ferry-keeper of Mirewick")
+    user = prompts.opening_messages(camp, PLAYER, [], FERRY)[1]["content"]
+    assert "is Mother Hesk, the ferry-keeper of Mirewick." in user
+    assert "do not give anyone else that role" in user
+
+
+def test_split_patron_and_known_text():
+    assert prompts.split_patron("Mother Hesk, the ferry-keeper of Mirewick") == ("Mother Hesk", "the ferry-keeper of Mirewick")
+    assert prompts.split_patron("Mother Hesk (ferry-keeper)") == ("Mother Hesk", "ferry-keeper")
+    assert prompts.split_patron("The Guild") == ("The Guild", "")
+    assert prompts.split_patron("") == ("", "")
+    text = prompts.opening_known_text(CAMPAIGN, PLAYER, [("Rope", 1)], [FERRY, CAUSEWAY])
+    assert "Mirewick Ferry" in text and "Rope" in text and "Aria" in text
 
 
 def test_beats_prompt_only_offers_location_and_referee():
     system = prompts.beats_messages(CAMPAIGN, [FERRY, CAUSEWAY], 4, 6)[0]["content"]
     assert "has_item" not in system and "npc_dead" not in system
     assert "beat 1 must be something still ahead" in system and "Mirewick Ferry" in system
+
+
+def test_memory_facts_prompt():
+    msgs = prompts.memory_facts_messages("STORY SO FAR:\nOld.", "Aria met Hesk.", "Aria")
+    system = msgs[0]["content"]
+    assert "Never invent" in system and "open_threads" in system and "promises_debts" in system
+    assert "key_npcs" not in system and "npc_notes" not in system
+    assert "<one unresolved goal" in system
+    assert "EXISTING SUMMARY:\nSTORY SO FAR:\nOld." in msgs[1]["content"]
+    assert "NEW EVENTS:\nAria met Hesk." in msgs[1]["content"]
+    assert "(none yet)" in prompts.memory_facts_messages("", "x", "Aria")[1]["content"]

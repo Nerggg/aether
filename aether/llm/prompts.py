@@ -163,6 +163,34 @@ def scene_state_block(
         lines.append(f"Inventory: {_inventory_text(inventory)}")
     return "\n".join(lines)
 
+def split_patron(patron: str) -> Tuple[str, str]:
+    """'Mother Hesk, the ferry-keeper of Mirewick' -> ('Mother Hesk', 'the ferry-keeper of Mirewick')."""
+    patron = " ".join((patron or "").split())
+    for sep in (",", " - ", " \u2014 ", " ("):
+        if sep in patron:
+            name, role = patron.split(sep, 1)
+            return name.strip(), role.strip(" )")
+    return patron, ""
+
+
+def opening_known_text(
+    campaign: CampaignInfo,
+    player: Character,
+    inventory: Sequence[Tuple[str, int]],
+    locations: Sequence[Location],
+    npcs: Sequence[Character] = (),
+) -> str:
+    """Everything the opener may legitimately mention, for `calls.find_invented_names`."""
+    parts = [
+        campaign.name, campaign.starting_patron, campaign.setting_description, campaign.primary_threat,
+        campaign.starting_quest_hook, campaign.storyline_beginning, campaign.storyline_middle,
+        campaign.storyline_end, player.name, player.backstory, player.race or "", player.char_class or "",
+    ]
+    for loc in locations:
+        parts += [loc.name, loc.brief_concept]
+    parts += [name for name, _ in inventory]
+    parts += [n.name for n in npcs]
+    return " ".join(p for p in parts if p)
 
 def opening_messages(
     campaign: CampaignInfo,
@@ -188,18 +216,28 @@ def opening_messages(
         if block
     )
     hook = campaign.starting_quest_hook or "the call to adventure"
-    allowed = [campaign.starting_patron] if campaign.starting_patron else []
+    patron_name, patron_role = split_patron(campaign.starting_patron)
+    allowed = [patron_name] if patron_name else []
     allowed += [n.name for n in npcs if not any(n.name in a for a in allowed)]
-    cast = (
-        f"The only named characters in the scene are {', '.join(allowed)}; "
-        "do not invent any other named character. "
-        if allowed
-        else "Do not name any character. "
-    )
+    if not allowed:
+        cast = "Do not name any character. "
+    elif len(allowed) == 1:
+        role = f", {patron_role}" if patron_role and allowed[0] == patron_name else ""
+        cast = (
+            f"The only named character in the scene is {allowed[0]}{role}. "
+            "Do not invent any other named character, and do not give anyone else that role. "
+        )
+    else:
+        cast = (
+            f"The only named characters in the scene are {', '.join(allowed)}. "
+            "Do not invent any other named character. "
+        )
     instruction = (
-        f"Write the opening scene. Start in the middle of a moment that leads into this quest hook: {hook}. "
+        f"Write the first scene. Start in the middle of a moment that leads into this quest hook: {hook}. "
         f"{cast}"
-        f"Let {player.name}'s backstory colour what happens. "
+        "Narrate in second person, present tense: the player is \"you\", never \"she\", \"he\" or a name "
+        "(for example: \"You step onto the pier, and the planks groan under your boots.\"). "
+        "Work one detail from the player's backstory into the scene as something you notice or remember. "
         "Do NOT begin with the character waking up or opening their eyes. "
         "Write exactly 2 short paragraphs, about 120 words in total. "
         "End on a vivid image or sound, then stop, without any question to the player."
@@ -289,47 +327,31 @@ def judge_messages(
 
 # --- compaction ----------------------------------------------------------------------------------------
 
-_COMPACTION_EXAMPLE = (
-    '{"narrative":"Kael bargained with the caravan master Dessa, who offered double pay to guard '
-    'the water wagon across the dunes. Kael accepted and learned that a bandit named Voss raids the eastern route.",'
-    '"key_npcs":["Dessa","Voss"],'
-    '"open_threads":["Cross the dunes safely","Find out where Voss hides"],'
-    '"promises_debts":["Dessa will pay Kael double on arrival"],'
-    '"npc_notes":[{"name":"Dessa","notes":"Runs the caravan and wants the water wagon protected."}]}'
+_FACTS_EXAMPLE = (
+    '{"open_threads":["<one unresolved goal or mystery>"],'
+    '"promises_debts":["<one promise, debt or favour owed>"]}'
 )
 
-
-def compaction_messages(
-    previous_summary_text: str,
-    transcript_text: str,
-    player_name: str,
-    max_words: int,
-) -> Messages:
+def memory_facts_messages(previous_summary_text: str, events_text: str, player_name: str) -> Messages:
     lines = [
         "You keep the memory of an ongoing role-playing campaign.",
-        "Merge the existing summary with the new events into one updated summary.",
+        "Read the existing summary and the new events, then list what the story still needs to remember.",
         "",
         "RULES",
-        "- Summarise, do not retell: the narrative must be much shorter than the new events.",
-        "- Only record what the text says happened. Never invent dialogue, decisions, feelings or events.",
-        "- Keep names, places, decisions, discoveries, promises and consequences. "
-        "Drop scenery, atmosphere and trivia.",
-        "- Keep important facts from the existing summary unless the new events resolve them.",
-        "- Do not record HP, inventory or the current location: those are tracked elsewhere.",
-        f"- narrative: past tense, third person, at most {max_words} words. The player's character is {player_name}.",
-        "- key_npcs: names of important characters met (at most 8).",
+        "- Only list things the text states. Never invent names, places or events.",
+        "- Use short phrases that reuse the words of the text.",
+        "- Return the full updated lists: keep earlier entries unless the new events resolve them.",
+        "- If there is nothing for a list, return an empty list.",
+        f"- The player's character is {player_name}.",
         "- open_threads: unresolved goals or mysteries (at most 5).",
         "- promises_debts: promises made, debts and favours owed (at most 4).",
-        "- npc_notes: for each important character, one sentence on what the player knows about them.",
-        "- Fill every list that has anything to put in it.",
         "",
-        "Reply as JSON, for example (a different story):",
-        _COMPACTION_EXAMPLE,
+        "Reply as JSON in this shape (replace the <placeholders>):",
+        _FACTS_EXAMPLE,
     ]
     existing = previous_summary_text.strip() or "(none yet)"
-    user = f"EXISTING SUMMARY:\n{existing}\n\nNEW EVENTS:\n{transcript_text.strip()}"
+    user = f"EXISTING SUMMARY:\n{existing}\n\nNEW EVENTS:\n{events_text.strip()}"
     return [{"role": "system", "content": "\n".join(lines)}, {"role": "user", "content": user}]
-
 
 # --- story beats (campaign creation) ---------------------------------------------------------------------
 

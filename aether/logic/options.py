@@ -20,7 +20,7 @@ SITUATIONS = (EXPLORATION, CONVERSATION)
 STORY = "story"
 CATEGORY_POOLS: Dict[str, tuple] = {
     EXPLORATION: ("cautious", "bold", "investigative", "resourceful"),
-    CONVERSATION: ("friendly", "probing", "confrontational", "leave"),
+    CONVERSATION: ("friendly", "probing", "firm", "leave"),
 }
 
 # Instruction the options prompt gives the model for each slot.
@@ -32,7 +32,7 @@ CATEGORY_HINTS: Dict[str, str] = {
     "resourceful": "a clever action using an item, ability or the surroundings",
     "friendly": "a friendly or diplomatic reply or action",
     "probing": "asking a question or probing for information",
-    "confrontational": "a firm, threatening or confrontational action",
+    "firm": "a direct, skeptical or demanding reply, without threats",
     "leave": "ending the exchange and moving on",
 }
 
@@ -66,9 +66,26 @@ FALLBACK_OPTIONS.update({
     "resourceful": ActionOption("Try something clever", "survival", "resourceful"),
     "friendly": ActionOption("Speak kindly", "persuasion", "friendly"),
     "probing": ActionOption("Ask probing questions", "insight", "probing"),
-    "confrontational": ActionOption("Press them hard", "intimidation", "confrontational"),
+    "firm": ActionOption("Press for answers", None, "firm"),
     "leave": ActionOption("Walk away", None, "leave"),
 })
+
+# Skill to roll when the model leaves one out. Story, leave, friendly, probing
+# and firm stay roll-free: an ordinary conversation line should not risk a failure.
+DEFAULT_SKILLS: Dict[str, str] = {
+    "cautious": "perception",
+    "bold": "athletics",
+    "investigative": "investigation",
+    "resourceful": "survival",
+}
+
+
+def apply_default_skills(options: Sequence[ActionOption]) -> List[ActionOption]:
+    """Give each option without a skill the default for its category (if it has one)."""
+    for option in options:
+        if option.skill is None and option.category in DEFAULT_SKILLS:
+            option.skill = DEFAULT_SKILLS[option.category]
+    return list(options)
 
 
 def detect_situation(npc_names_present: Iterable[str], last_narration: str) -> str:
@@ -107,6 +124,10 @@ def select_categories(
 
 _LEADING = re.compile(r"^\s*(?:\(?\d+[.)\]:]|[-*\u2022])\s*")
 _FILLER = {"the", "a", "an", "to", "and", "of", "your", "you", "at", "in", "on", "for"}
+_DANGLING = _FILLER | {
+    "us", "me", "my", "him", "her", "them", "it", "with", "from", "into", "onto", "toward",
+    "towards", "off", "out", "up", "by", "as", "that", "than", "then", "but", "or", "get",
+}
 
 
 def clean_option_text(text: Any, max_words: int) -> str:
@@ -115,6 +136,8 @@ def clean_option_text(text: Any, max_words: int) -> str:
     words = t.split()
     if len(words) > max_words:
         words = words[:max_words]
+        while len(words) > 2 and words[-1].lower().strip(",;:-.") in _DANGLING:
+            words.pop()
     return " ".join(words).rstrip(",;:- ")
 
 

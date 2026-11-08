@@ -109,6 +109,18 @@ def format_transcript(messages: Sequence[Message], player_name: str = "Player") 
             lines.append(f"[{m.content}]")
     return "\n".join(lines)
 
+def group_exchanges(messages: Sequence[Message]) -> List[List[Message]]:
+    """Split messages into exchanges: each player message starts one, and the
+    DM reply and dice notes that follow belong to it. A leading DM message
+    (the opener) is its own group."""
+    groups: List[List[Message]] = []
+    for m in messages:
+        if m.role == "player" or not groups:
+            groups.append([m])
+        else:
+            groups[-1].append(m)
+    return groups
+
 
 # --- prompt assembly --------------------------------------------------------------------
 

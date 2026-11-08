@@ -64,7 +64,7 @@ class TemperatureConfig:
     options: float = 0.5
     judge: float = 0.0
     referee: float = 0.0
-    compaction: float = 0.3
+    compaction: float = 0.1
     creation: float = 0.7
 
     def for_role(self, role: str) -> float:

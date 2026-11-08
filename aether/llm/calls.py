@@ -19,18 +19,17 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
-from aether.config import Config
 from aether.llm import prompts
 from aether.llm.client import LLMClient, Messages
 from aether.llm.schemas import (
     BeatsBlueprint,
-    CompactionResult,
+    MemoryFacts,
     JudgeVerdict,
     NewNpc,
     OptionsResponse,
 )
-from aether.logic.memory import format_transcript, summary_to_text
-from aether.logic.options import ActionOption, complete_options, sanitize_options
+from aether.logic.memory import group_exchanges, summary_to_text
+from aether.logic.options import ActionOption, apply_default_skills, complete_options, sanitize_options
 from aether.logic.stats import normalize_skill
 from aether.logic.story import is_valid_condition
 from aether.logic.tags import ParseResult, Tag, TagParser
@@ -42,13 +41,15 @@ OPTIONS_MAX_TOKENS = 300
 JUDGE_MAX_TOKENS = 150
 BEATS_MAX_TOKENS = 700
 LOCATION_MAX_TOKENS = 300
-COMPACTION_EXTRA_TOKENS = 250   # room for the lists and NPC notes on top of the narrative
 
 MAX_NEW_NPCS = 3
 MAX_LIST_ITEMS = {"key_npcs": 8, "open_threads": 5, "promises_debts": 4}
 
-MIN_SUMMARY_WORDS = 60
 ALLOWED_BEAT_CONDITIONS = ("location", "referee")
+
+ACTION_MAX_CHARS = 90          # the player's part of one summary line
+EVENT_MAX_CHARS = 150          # the DM-reply part
+FACTS_MAX_TOKENS = 250
 
 
 # --- narration -------------------------------------------------------------------------------------
@@ -108,6 +109,48 @@ def narrate(client: LLMClient, messages: Messages) -> Tuple[str, List[Tag]]:
         tags.extend(result.tags)
     return tidy_narration("".join(text)), tags
 
+_CAP_WORD = re.compile(r"\b[A-Z][a-z]{2,}\b")
+
+
+def find_invented_names(narration: str, known_text: str) -> List[str]:
+    """Capitalised words in mid-sentence that appear nowhere in `known_text`.
+
+    A cheap check for characters the model made up. It cannot see an invented
+    name at the very start of a sentence, and it will occasionally flag a
+    capitalised common word, so use it only to trigger a retry, never to block.
+    """
+    known = {w.lower() for w in re.findall(r"[A-Za-z']+", known_text)}
+    found: List[str] = []
+    for m in _CAP_WORD.finditer(narration):
+        before = narration[: m.start()].rstrip()
+        if not before or before[-1] in '.!?"\u201c\n':
+            continue
+        word = m.group()
+        if word.lower() not in known and word not in found:
+            found.append(word)
+    return found
+
+
+def narrate_opening(
+    client: LLMClient, messages: Messages, *, known_text: str, max_attempts: int = 2
+) -> Tuple[str, List[Tag]]:
+    """The opening scene, regenerated once if it names someone who does not exist.
+
+    Returns the attempt with the fewest invented names. This is not streamed,
+    because the text has to be checked before the player sees it.
+    """
+    best: Optional[Tuple[str, List[Tag], int]] = None
+    for _ in range(max_attempts):
+        text, tags = narrate(client, messages)
+        invented = find_invented_names(text, known_text)
+        if not invented:
+            return text, tags
+        if best is None or len(invented) < best[2]:
+            best = (text, tags, len(invented))
+        hint = f" Do not mention anyone named {', '.join(invented)}."
+        messages = messages[:-1] + [{**messages[-1], "content": messages[-1]["content"] + hint}]
+    return best[0], best[1]
+
 def describe_location(client: LLMClient, *, name: str, concept: str, vibe: str = "") -> str:
     """Just-in-time description for a location. Falls back to its concept."""
     reply = client.chat(
@@ -159,7 +202,7 @@ def generate_options(
         cat = (o.category or "").strip().lower()
         raw.append({"text": o.text, "skill": o.skill, "category": cat if cat in categories else None})
     cleaned = sanitize_options(raw, max_words, limit, categories)
-    options = complete_options(cleaned, categories, limit)
+    options = apply_default_skills(complete_options(cleaned, categories, limit))
     order = {c: i for i, c in enumerate(categories)}
     options.sort(key=lambda o: order.get(o.category, len(order)))
 
@@ -258,6 +301,83 @@ def _clean_list(items: Sequence[str], limit: int) -> List[str]:
             break
     return out
 
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_WORD = re.compile(r"[A-Za-z][A-Za-z'\-]*")
+_CHECK_RESULT = re.compile(r"-\s*(Success|Failure)\s*$", re.IGNORECASE)
+_STOPWORDS = frozenset({
+    "that", "this", "with", "from", "into", "about", "have", "will", "what", "when", "where",
+    "there", "their", "them", "they", "then", "than", "your", "been", "were", "would", "could",
+    "should", "some", "more", "only", "also", "just",
+})
+
+
+def _first_sentence(text: str) -> str:
+    text = " ".join(text.split())
+    return _SENTENCE_END.split(text, maxsplit=1)[0] if text else ""
+
+
+def extractive_event(group: Sequence[Message], player_name: str) -> str:
+    """One summary line built only from the text itself, so it cannot be invented.
+
+    'Aria chose "Ask about the bell" (success). Mother Hesk says the bell sank long ago.'
+    """
+    action, result, outcome = "", "", ""
+    for m in group:
+        if m.role == "player" and not action:
+            action = _truncate_text(" ".join(m.content.split()).rstrip(" .!?"), ACTION_MAX_CHARS)
+        elif m.role == "dm" and not result:
+            result = _truncate_text(_first_sentence(m.content), EVENT_MAX_CHARS)
+        elif m.role == "system":
+            found = _CHECK_RESULT.search(m.content)
+            if found:
+                outcome = found.group(1).lower()
+    parts = []
+    if action:
+        parts.append(f'{player_name} chose "{action}"' + (f" ({outcome})" if outcome else "") + ".")
+        if result:
+            parts.append(result)
+    elif result:
+        parts.append(f"Opening: {result}")
+    return " ".join(parts)
+
+
+def _norm(word: str) -> str:
+    w = word.lower().strip("'-")
+    return w[:-2] if w.endswith("'s") else w
+
+
+def is_grounded(item: str, source: str) -> bool:
+    """True if `item` plausibly comes from `source` (a heuristic, not a proof).
+
+    Rejects an item with a capitalised word (other than the first) that is not in
+    the source, and one where fewer than half its content words appear there.
+    """
+    raw = _WORD.findall(item)
+    if not raw:
+        return False
+    source_words = {_norm(w) for w in _WORD.findall(source)}
+    for i, w in enumerate(raw):
+        if i > 0 and w[0].isupper() and _norm(w) not in source_words:
+            return False
+    stems = {w[:5] for w in source_words}
+    content = [n for n in map(_norm, raw) if len(n) >= 4 and n not in _STOPWORDS]
+    if not content:
+        return False
+    hits = sum(1 for n in content if n[:5] in stems)
+    return hits * 2 >= len(content)
+
+
+def _note_for(name: str, messages: Sequence[Message]) -> str:
+    """The latest DM sentence that mentions `name`, or ''."""
+    low = name.lower()
+    for m in reversed(messages):
+        if m.role != "dm":
+            continue
+        for sentence in _SENTENCE_END.split(" ".join(m.content.split())):
+            if low in sentence.lower():
+                return _truncate_text(sentence, 160)
+    return ""
+
 
 def compact_history(
     client: LLMClient,
@@ -265,53 +385,61 @@ def compact_history(
     previous: Optional[Summary],
     messages: Sequence[Message],
     player_name: str = "Player",
+    known_npc_names: Sequence[str] = (),
 ) -> Optional[Compaction]:
-    """Fold `messages` into the running summary.
+    """Fold `messages` into the running summary, using the model as little as possible.
 
-    Returns None if the model fails; the caller just tries again on a later
-    turn (the raw transcript is untouched either way).
+    The narrative is one extractive line per exchange; when it grows past the
+    limit the oldest lines are dropped. Key NPCs and their notes come from
+    `known_npc_names` (pass the database's NPC names, not the player's). The
+    model only proposes open threads and promises, and anything the transcript
+    does not support is discarded. The raw transcript is never touched.
     """
     if not messages:
         return None
     mem = client.config.memory
-    previous_text = summary_to_text(previous)
-    transcript_text = format_transcript(messages, player_name)
-    # The summary may grow by about half the size of the new events, never past the configured cap.
-    max_words = min(
-        int(mem.summary_max_tokens * 0.75),
-        max(MIN_SUMMARY_WORDS, len(previous_text.split()) + len(transcript_text.split()) // 2),
-    )
-    prompt = prompts.compaction_messages(previous_text, transcript_text, player_name, max_words)
-    response = client.structured(
+
+    events = [e for e in (extractive_event(g, player_name) for g in group_exchanges(messages)) if e]
+    if not events:
+        return None
+    lines = [l.strip() for l in (previous.narrative.splitlines() if previous else []) if l.strip()]
+    lines += events
+    max_words = int(mem.summary_max_tokens * 0.75)
+    while len(lines) > 1 and sum(len(l.split()) for l in lines) > max_words:
+        lines.pop(0)
+    narrative = "\n".join(lines)
+
+    raw = " ".join(m.content for m in messages if m.role != "system")
+    source = " ".join([summary_to_text(previous), raw, player_name, *known_npc_names])
+
+    mentioned = [n.strip() for n in known_npc_names if n.strip() and n.strip().lower() in raw.lower()]
+    key_npcs = _clean_list([*(previous.key_npcs if previous else []), *mentioned], MAX_LIST_ITEMS["key_npcs"])
+    notes: Dict[str, str] = {}
+    for name in mentioned:
+        note = _note_for(name, messages)
+        if note:
+            notes[name] = note
+
+    facts = client.structured(
         "compaction",
-        prompt,
-        CompactionResult,
-        max_tokens=mem.summary_max_tokens + COMPACTION_EXTRA_TOKENS,
+        prompts.memory_facts_messages(summary_to_text(previous), "\n".join(events), player_name),
+        MemoryFacts,
+        max_tokens=FACTS_MAX_TOKENS,
     )
-    if response is None:
-        return None
-
-    narrative = " ".join(response.narrative.split())
-    limit_chars = mem.summary_max_tokens * 4
-    if len(narrative.split()) > max_words * 1.3:      # it retold the story instead of summarising
-        limit_chars = min(limit_chars, max_words * 6)
-    narrative = _truncate_text(narrative, limit_chars)
-
-    if not narrative:
-        return None
+    if facts is None:       # keep what we knew; the lists catch up next time
+        threads = previous.open_threads if previous else []
+        promises = previous.promises_debts if previous else []
+    else:
+        threads = [t for t in facts.open_threads if is_grounded(t, source)]
+        promises = [p for p in facts.promises_debts if is_grounded(p, source)]
 
     summary = Summary(
         covers_through_message_id=messages[-1].id,
         narrative=narrative,
-        key_npcs=_clean_list(response.key_npcs, MAX_LIST_ITEMS["key_npcs"]),
-        open_threads=_clean_list(response.open_threads, MAX_LIST_ITEMS["open_threads"]),
-        promises_debts=_clean_list(response.promises_debts, MAX_LIST_ITEMS["promises_debts"]),
+        key_npcs=key_npcs,
+        open_threads=_clean_list(threads, MAX_LIST_ITEMS["open_threads"]),
+        promises_debts=_clean_list(promises, MAX_LIST_ITEMS["promises_debts"]),
     )
-    notes = {
-        n.name.strip(): " ".join(n.notes.split())
-        for n in response.npc_notes
-        if n.name.strip() and n.notes.strip()
-    }
     return Compaction(summary, notes)
 
 

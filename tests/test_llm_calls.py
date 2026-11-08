@@ -69,7 +69,7 @@ def test_generate_options_cleans_and_assigns_categories():
     client, backend = client_with(reply)
     r = calls.generate_options(client, narration="n", categories=CATS, state_block="s", beat=BEAT)
     assert [o.text for o in r.options] == ["Search for the bell's source", "Move quietly down the path", "Charge into the fog"]
-    assert [o.skill for o in r.options] == ["investigation", "stealth", None]
+    assert [o.skill for o in r.options] == ["investigation", "stealth", "athletics"]
     assert [o.category for o in r.options] == CATS
     assert r.ok and not r.beat_achieved and r.new_npcs == []
     assert backend.calls[0]["options"]["num_predict"] == calls.OPTIONS_MAX_TOKENS
@@ -176,49 +176,114 @@ def test_judge_failure_lets_the_action_through():
 MSGS = [Message(10, 1, "player", "Hi."), Message(11, 1, "dm", "Hello, traveller.")]
 
 
-def test_compaction_builds_summary_ready_to_save():
-    client, backend = client_with(js(
-        narrative="  Aria met Mother Hesk.  ",
-        key_npcs=["Mother Hesk", "mother hesk", ""],
-        open_threads=["Find the bell"],
-        promises_debts=["Free ferry passage"],
-        npc_notes=[{"name": " Mother Hesk ", "notes": "Runs the ferry."}, {"name": "", "notes": "x"}],
-    ))
-    prev = Summary(covers_through_message_id=5, narrative="Earlier.")
-    c = calls.compact_history(client, previous=prev, messages=MSGS, player_name="Aria")
-    assert c.summary.covers_through_message_id == 11
-    assert c.summary.narrative == "Aria met Mother Hesk."
-    assert c.summary.key_npcs == ["Mother Hesk"]
-    assert c.summary.open_threads == ["Find the bell"]
-    assert c.npc_notes == {"Mother Hesk": "Runs the ferry."}
-    prompt = backend.calls[0]["messages"][1]["content"]
-    assert "Earlier." in prompt and "Aria: Hi." in prompt and "DM: Hello, traveller." in prompt
-
-
-def test_compaction_caps_lists_and_narrative_length():
-    cfg = Config()
-    cfg.memory.summary_max_tokens = 100          # 400 characters
-    long = ("Sentence number one is here. " * 40).strip()
-    client, backend = client_with(js(narrative=long, key_npcs=[f"N{i}" for i in range(20)]), config=cfg)
-    c = calls.compact_history(client, previous=None, messages=MSGS)
-    assert len(c.summary.narrative) <= 400
-    assert c.summary.narrative.endswith(".")
-    assert len(c.summary.key_npcs) == 8
-    assert backend.calls[0]["options"]["num_predict"] == 100 + calls.COMPACTION_EXTRA_TOKENS
-
-
-def test_compaction_failure_returns_none():
-    client, _ = client_with("nope")
-    assert calls.compact_history(client, previous=None, messages=MSGS) is None
-    client, _ = client_with(js(narrative="   "))
-    assert calls.compact_history(client, previous=None, messages=MSGS) is None
-
-
 def test_compaction_of_nothing_makes_no_call():
     client, backend = client_with("x")
     assert calls.compact_history(client, previous=None, messages=[]) is None
     assert backend.calls == []
 
+BELL = [
+    Message(1, 0, "dm", "Fog covers the ferry. Mother Hesk waits."),
+    Message(2, 1, "player", "Ask Mother Hesk about the bell."),
+    Message(3, 1, "system", "Perception check (WIS): d20 15 + 2 = 17 vs DC 13 - Success"),
+    Message(4, 1, "dm", "Mother Hesk says the bell belonged to a chapel that sank long ago. She begs you to find it."),
+]
+NO_FACTS = js(open_threads=[], promises_debts=[])
+
+
+def test_extractive_event_formats():
+    G = calls.extractive_event
+    assert G([Message(1, 1, "player", "Run away!")], "Aria") == 'Aria chose "Run away".'
+    assert G([Message(1, 0, "dm", "Fog rolls in. More text.")], "Aria") == "Opening: Fog rolls in."
+    group = [Message(1, 1, "player", "Sneak past."),
+             Message(2, 1, "system", "Stealth check (DEX): d20 3 + 1 = 4 vs DC 13 - Failure"),
+             Message(3, 1, "dm", "A guard shouts! You run.")]
+    assert G(group, "Aria") == 'Aria chose "Sneak past" (failure). A guard shouts!'
+    assert G([], "Aria") == ""
+
+
+def test_is_grounded():
+    src = "Mother Hesk begs Aria to find the drowned bell near the chapel."
+    assert calls.is_grounded("Find the drowned bell", src)
+    assert not calls.is_grounded("Visit Elwynn in Ravenshire", src)
+    assert not calls.is_grounded("Cross the dunes safely", src)
+    assert not calls.is_grounded("...", src)
+
+
+def test_compaction_lines_are_extractive_and_npcs_come_from_the_database():
+    client, backend = client_with(NO_FACTS)
+    c = calls.compact_history(client, previous=None, messages=BELL, player_name="Aria",
+                              known_npc_names=["Mother Hesk", "Gruk"])
+    assert c.summary.narrative.splitlines() == [
+        "Opening: Fog covers the ferry.",
+        'Aria chose "Ask Mother Hesk about the bell" (success). '
+        "Mother Hesk says the bell belonged to a chapel that sank long ago.",
+    ]
+    assert c.summary.covers_through_message_id == 4
+    assert c.summary.key_npcs == ["Mother Hesk"]
+    assert c.npc_notes == {"Mother Hesk": "Mother Hesk says the bell belonged to a chapel that sank long ago."}
+    assert len(backend.calls) == 1 and "format" in backend.calls[0]
+
+
+def test_compaction_drops_threads_and_promises_the_text_never_mentions():
+    client, _ = client_with(js(
+        open_threads=["Find the bell", "Find out where Voss hides", "Cross the dunes safely", "..."],
+        promises_debts=["Dessa will pay Kael double on arrival", "Mother Hesk wants the bell found"],
+    ))
+    c = calls.compact_history(client, previous=None, messages=BELL, player_name="Aria",
+                              known_npc_names=["Mother Hesk"])
+    assert c.summary.open_threads == ["Find the bell"]
+    assert c.summary.promises_debts == ["Mother Hesk wants the bell found"]
+
+
+def test_compaction_keeps_old_lists_when_the_facts_call_fails():
+    client, _ = client_with("garbage")
+    prev = Summary(covers_through_message_id=0, narrative="Earlier line.", key_npcs=["Hesk"],
+                   open_threads=["Find it"], promises_debts=["A favour"])
+    c = calls.compact_history(client, previous=prev, messages=BELL, player_name="Aria")
+    assert c.summary.narrative.splitlines()[0] == "Earlier line."
+    assert (c.summary.key_npcs, c.summary.open_threads, c.summary.promises_debts) == (
+        ["Hesk"], ["Find it"], ["A favour"])
+
+
+def test_compaction_caps_key_npcs():
+    names = [f"Npc{i}" for i in range(12)]
+    msgs = [Message(1, 1, "player", "Hi."), Message(2, 1, "dm", " ".join(names) + " all wait.")]
+    client, _ = client_with(NO_FACTS)
+    c = calls.compact_history(client, previous=None, messages=msgs, known_npc_names=names)
+    assert c.summary.key_npcs == names[:8]
+
+
+def test_compaction_drops_the_oldest_lines_when_the_summary_is_too_long():
+    cfg = Config()
+    cfg.memory.summary_max_tokens = 100                      # 75 words
+    prev = Summary(covers_through_message_id=0,
+                   narrative="\n".join(f"Old event number {i} " + "filler " * 5 for i in range(10)))
+    client, _ = client_with(NO_FACTS, config=cfg)
+    narrative = calls.compact_history(client, previous=prev, messages=BELL, player_name="Aria").summary.narrative
+    assert "Old event number 0" not in narrative
+    assert narrative.splitlines()[-1].startswith("Aria chose")
+    assert len(narrative.split()) <= 75
+
+def test_find_invented_names():
+    known = "Mother Hesk Aria Mirewick Ferry"
+    text = 'The fog rolls in. Ferry-keeper Grimbold waves. "Come," says Mother Hesk.'
+    assert calls.find_invented_names(text, known) == ["Grimbold"]
+    assert calls.find_invented_names("You see Mother Hesk.", known) == []
+
+
+def test_opening_is_regenerated_when_a_name_is_invented():
+    good, bad = "You step onto the pier. Mother Hesk waits.", "You step onto the pier. Old Grimbold waits."
+    client, backend = client_with(bad, good)
+    text, _ = calls.narrate_opening(client, [{"role": "user", "content": "go"}], known_text="Mother Hesk")
+    assert text == good and len(backend.calls) == 2
+    assert "Grimbold" in backend.calls[1]["messages"][-1]["content"]
+
+
+def test_opening_gives_up_after_the_attempt_limit():
+    bad = "You step onto the pier. Old Grimbold waits."
+    client, backend = client_with(bad)
+    text, _ = calls.narrate_opening(client, [{"role": "user", "content": "go"}], known_text="Mother Hesk")
+    assert text == bad and len(backend.calls) == 2
 
 # --- story beats -----------------------------------------------------------------------------------------------
 
@@ -317,11 +382,3 @@ def test_generate_options_follows_model_categories_and_sorts_to_slots():
     r = calls.generate_options(client, narration="n", categories=CATS, state_block="s")
     assert [o.category for o in r.options] == CATS
     assert r.options[0].text == "Search for the bell"
-
-
-def test_compaction_retelling_is_cut_to_a_share_of_the_input():
-    retold = " ".join(["Aria did something notable."] * 30)       # 120 words for ~5 words of input
-    client, _ = client_with(js(narrative=retold))
-    c = calls.compact_history(client, previous=None, messages=MSGS)
-    assert len(c.summary.narrative.split()) <= calls.MIN_SUMMARY_WORDS
-    assert c.summary.narrative.endswith(".")

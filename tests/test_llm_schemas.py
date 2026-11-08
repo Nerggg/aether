@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from aether.llm.schemas import BeatsBlueprint, CompactionResult, JudgeVerdict, OptionsResponse
+from aether.llm.schemas import BeatsBlueprint, MemoryFacts, JudgeVerdict, OptionsResponse
 
 
 def test_options_response_only_needs_options():
@@ -30,9 +30,9 @@ def test_judge_verdict_defaults_and_validation():
         JudgeVerdict.model_validate_json('{"verdict":"risky","difficulty":"extreme"}')
 
 
-def test_compaction_result_only_needs_narrative():
-    r = CompactionResult.model_validate_json('{"narrative":"Things happened."}')
-    assert r.key_npcs == [] and r.npc_notes == []
+def test_memory_facts_all_optional():
+    r = MemoryFacts.model_validate_json("{}")
+    assert r.open_threads == [] and r.promises_debts == []
 
 
 def test_beats_condition_defaults_to_referee_and_accepts_any_string():
@@ -48,5 +48,5 @@ def test_option_category_is_optional():
 
 
 def test_schemas_export_json_schema():
-    for model in (OptionsResponse, JudgeVerdict, CompactionResult, BeatsBlueprint):
+    for model in (OptionsResponse, JudgeVerdict, MemoryFacts, BeatsBlueprint):
         assert "properties" in model.model_json_schema()

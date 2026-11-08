@@ -194,3 +194,28 @@ def test_missing_models_when_ollama_is_down():
     client, _ = make("x", models=ConnectionError("down"))
     with pytest.raises(LLMError, match="list"):
         client.missing_models()
+
+class StatBackend:
+    STATS = {"load_duration": 2_000_000_000, "prompt_eval_count": 100, "prompt_eval_duration": 1_000_000_000,
+             "eval_count": 50, "eval_duration": 4_000_000_000}
+
+    def chat(self, **kw):
+        if kw["stream"]:
+            return iter([{"message": {"content": "a"}}, {"message": {"content": "b"}, "done": True, **self.STATS}])
+        return {"message": {"content": "hi"}, **self.STATS}
+
+
+def test_timing_stats_are_recorded_for_chat_and_stream():
+    client = LLMClient(Config(), StatBackend())
+    client.chat("dm", MSGS)
+    list(client.stream("dm", MSGS))
+    assert len(client.call_log) == 2
+    s = client.call_log[0]
+    assert (s.role, s.load_s, s.prompt_tokens, s.gen_tokens) == ("dm", 2.0, 100, 50)
+    assert s.gen_tps == 12.5 and s.prompt_tps == 100.0
+
+
+def test_missing_timing_fields_record_nothing():
+    client, _ = make("ok")
+    client.chat("dm", MSGS)
+    assert len(client.call_log) == 0

@@ -89,6 +89,7 @@ def step_opener(client: LLMClient) -> None:
     messages = prompts.opening_messages(
         CAMPAIGN, PLAYER, INVENTORY, LOCATIONS[0], [LOCATIONS[1]], [MOTHER_HESK], BEAT
     )
+    known = prompts.opening_known_text(CAMPAIGN, PLAYER, INVENTORY, LOCATIONS, [MOTHER_HESK])
     with timed("opener (streamed)"):
         start = time.perf_counter()
         first = None
@@ -101,9 +102,10 @@ def step_opener(client: LLMClient) -> None:
             text.append(result.text)
             for tag in result.tags:
                 print(f"\n[TAG {tag.name}: {tag.value}]", end="")
-        total = time.perf_counter() - start
-        tokens = estimate_tokens("".join(text))
-        print(f"\n[~{tokens} tokens, ~{tokens / max(total, 0.01):.1f} tokens/s]")
+        full = "".join(text)
+        lower = f" {full.lower()} "
+        print(f"\n[invented names: {calls.find_invented_names(full, known) or 'none'}]")
+        print(f"[style: ' you ' x{lower.count(' you ')}, ' she '/' he ' x{lower.count(' she ') + lower.count(' he ')}]")
 
 
 def step_options(client: LLMClient) -> None:
@@ -151,7 +153,10 @@ def step_compaction(client: LLMClient) -> None:
         Message(12, 5, "dm", "The shape sinks without a ripple. On the boat's hull, scratched with a nail, are the words: ORSOLYA TAKES WHAT IS NOT GIVEN."),
     ]
     with timed("compaction"):
-        c = calls.compact_history(client, previous=None, messages=transcript, player_name="Aria")
+        c = calls.compact_history(
+            client, previous=None, messages=transcript, player_name="Aria",
+            known_npc_names=["Mother Hesk", "Tulle"],
+        )
         if c is None:
             print("FAILED:", client.last_structured_error)
             return
@@ -193,6 +198,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown step(s): {', '.join(bad)}. Choose from: {', '.join(STEPS)}")
 
     client = LLMClient()
+    _ACTIVE["client"] = client
     cfg = client.config
     print(f"Ollama: {cfg.ollama.host}   num_ctx={cfg.ollama.num_ctx}")
     try:

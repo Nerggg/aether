@@ -53,13 +53,9 @@ class NpcNote(BaseModel):
     name: str
     notes: str
 
-
-class CompactionResult(BaseModel):
-    narrative: str
-    key_npcs: List[str] = Field(default_factory=list)
+class MemoryFacts(BaseModel):
     open_threads: List[str] = Field(default_factory=list)
     promises_debts: List[str] = Field(default_factory=list)
-    npc_notes: List[NpcNote] = Field(default_factory=list)
 
 
 # --- story beats (campaign creation) ------------------------------------------------------------

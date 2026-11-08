@@ -12,6 +12,7 @@ from aether.logic.memory import (
     summary_to_text,
     total_tokens,
     trim_to_budget,
+    group_exchanges,
 )
 from aether.models import Message, Summary
 
@@ -228,3 +229,8 @@ def test_assemble_with_summary_but_no_tail_has_no_marker():
     chat = assemble_prompt("SYS", s, [])
     assert CONTINUES_MARKER not in chat[0]["content"]
     assert len(chat) == 1
+
+def test_group_exchanges():
+    groups = group_exchanges(msgs(["dm", "player", "system", "dm", "player", "dm"]))
+    assert [[m.role for m in g] for g in groups] == [["dm"], ["player", "system", "dm"], ["player", "dm"]]
+    assert group_exchanges([]) == []
