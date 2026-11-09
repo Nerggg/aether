@@ -226,3 +226,7 @@ def test_memory_facts_prompt():
     assert "EXISTING SUMMARY:\nSTORY SO FAR:\nOld." in msgs[1]["content"]
     assert "NEW EVENTS:\nAria met Hesk." in msgs[1]["content"]
     assert "(none yet)" in prompts.memory_facts_messages("", "x", "Aria")[1]["content"]
+
+
+def test_beats_prompt_calls_the_hero_the_player():
+    assert 'never by a name' in prompts.beats_messages(CAMPAIGN, [FERRY, CAUSEWAY], 4, 6)[0]["content"]

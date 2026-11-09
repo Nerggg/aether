@@ -394,3 +394,14 @@ def test_a_later_beat_aimed_at_the_starting_location_is_downgraded():
     beats = calls.derive_beats(client, campaign=CAMPAIGN, locations=LOCS)
     assert (beats[0].condition_type, beats[0].condition_value) == ("location", "cave")
     assert (beats[1].condition_type, beats[1].condition_value) == ("referee", "")
+
+
+def test_the_final_beat_is_never_a_travel_beat():
+    reply = beats_reply(
+        {"title": "Go", "objective": "Enter.", "condition_type": "location", "condition_value": "cave"},
+        {"title": "Win", "objective": "Finish.", "condition_type": "location", "condition_value": "cave"},
+    )
+    client, _ = client_with(reply)
+    beats = calls.derive_beats(client, campaign=CAMPAIGN, locations=LOCS)
+    assert (beats[0].condition_type, beats[0].condition_value) == ("location", "cave")
+    assert (beats[1].condition_type, beats[1].condition_value) == ("referee", "")

@@ -490,6 +490,11 @@ def derive_beats(
             ctype, cvalue = "referee", ""
         beats.append(StoryBeat(len(beats) + 1, title, objective, ctype, cvalue))
 
+    # The final beat is the victory. A pure travel milestone there would finish
+    # the moment the previous beat does, because the confrontation happens at that place.
+    if beats and beats[-1].condition_type == "location":
+        beats[-1].condition_type, beats[-1].condition_value = "referee", ""
+
     if len(beats) < 2:
         return fallback_beats(campaign)
     return beats

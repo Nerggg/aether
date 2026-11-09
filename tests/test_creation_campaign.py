@@ -19,6 +19,7 @@ from aether.creation.campaign import (
     pending,
     save_campaign,
     prettify_name,
+    storyline_messages,
 )
 from aether.db import GameDB
 from aether.llm.client import LLMClient
@@ -373,3 +374,9 @@ def test_a_short_side_branch_is_kept():
     ))
     assert frozenset(("b", "x")) in pairs_of(w)
     assert frozenset(("b", "c")) in pairs_of(w)
+
+
+def test_storyline_prompt_makes_the_player_the_hero():
+    msgs = cc.storyline_messages({"setting_description": "A marsh."}, "Kael, a scholar")
+    assert "never the hero" in msgs[0]["content"]
+    assert "Kael, a scholar" in msgs[1]["content"] and "not the hero" in msgs[1]["content"]

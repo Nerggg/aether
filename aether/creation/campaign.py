@@ -182,12 +182,14 @@ def storyline_messages(checklist: Dict[str, str], patron: str) -> Messages:
             "- middle: 2 to 3 complications or obstacles on the journey, 2 to 3 sentences.",
             "- end: the climax and confrontation, 2 to 3 sentences.",
             "- victory_condition: one sentence naming the single concrete thing the player must do to win.",
+            "- The hero is \"the player\". Never give the hero a name. The starting patron only helps "
+            "the hero and is never the hero.",
             "",
             "Reply as JSON in this shape (replace the <placeholders>):",
             '{"beginning":"<text>","middle":"<text>","end":"<text>","victory_condition":"<text>"}',
         ]
     )
-    user = f"{_facts(checklist)}\nStarting patron: {patron}"
+    user = f"{_facts(checklist)}\nStarting patron (a helper, not the hero): {patron}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
