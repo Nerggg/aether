@@ -22,6 +22,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from string import capwords
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -42,6 +43,7 @@ MAX_LOCATIONS = 10
 MAX_INDEX_GAP = 2   # a connection may skip at most one location in the model's list order
 NAME_COUNT = 3
 FIELD_MAX_CHARS = 800
+MIN_FIELD_WORDS = 3   # "dark" or "decaying ruins" is a fragment, not a setting
 
 CHECKLIST_MAX_TOKENS = 300
 METADATA_MAX_TOKENS = 300
@@ -224,14 +226,23 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit].rsplit(" ", 1)[0].rstrip(",;:-. ") + "..."
 
 
-def merge_checklist(current: Dict[str, str], parsed: Optional[CampaignChecklist]) -> Dict[str, str]:
-    """Add newly decided values; never erase one the player already settled."""
+def merge_checklist(current: Dict[str, str], parsed: Optional[CampaignChecklist], source: str) -> Dict[str, str]:
+    """Accept at most ONE new value per turn: the first pending item.
+
+    The guide asks about one thing at a time, so a model that fills several
+    fields after one answer is guessing. The value must also be a real phrase
+    (MIN_FIELD_WORDS or more) and be grounded in `source`, the conversation
+    text. A value that is rejected is simply asked about again. Settled
+    values are never overwritten.
+    """
     merged = dict(current)
-    if parsed is not None:
-        for key in CHECKLIST_KEYS:
-            value = " ".join((getattr(parsed, key) or "").split())
-            if value:
-                merged[key] = value
+    missing = pending(merged)
+    if parsed is None or not missing:
+        return merged
+    key = missing[0]
+    value = " ".join((getattr(parsed, key) or "").split())
+    if len(value.split()) >= MIN_FIELD_WORDS and calls.is_grounded(value, source):
+        merged[key] = value
     return merged
 
 
@@ -311,12 +322,19 @@ def fallback_world() -> World:
     return World(locations, [("starting_point", "the_long_road"), ("the_long_road", "final_stronghold")], True)
 
 def prettify_name(name: str) -> str:
-    """'cult_haven' -> 'Cult Haven'. Names that already look like titles are left alone."""
+    """'cult_haven' -> 'Cult Haven', 'oakwood manor - fall of the scholar' -> 'Oakwood Manor'.
+
+    Names that already contain a capital letter are left alone.
+    """
     name = " ".join(name.split())
-    if " " in name:
-        return name
+    for sep in (" - ", " \u2013 ", " \u2014 "):
+        if sep in name:
+            head = name.split(sep, 1)[0].strip()
+            if head:
+                name = head
+            break
     spaced = name.replace("_", " ").strip()
-    return spaced.title() if spaced.islower() else spaced
+    return capwords(spaced) if spaced.islower() else spaced
 
 
 def build_world(draft: Optional[WorldMapDraft]) -> World:
@@ -499,7 +517,8 @@ class CampaignCreator:
             max_tokens=CHECKLIST_MAX_TOKENS,
             temperature=0.0,
         )
-        self.checklist = merge_checklist(self.checklist, parsed)
+        source = " ".join(m["content"] for m in self.history)
+        self.checklist = merge_checklist(self.checklist, parsed, source)
 
     def _guide_reply(self) -> None:
         self.print("\nGuide: ", end="", flush=True)

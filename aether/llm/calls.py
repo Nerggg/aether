@@ -486,7 +486,7 @@ def derive_beats(
         cvalue = draft.condition_value.strip()
         if ctype not in ALLOWED_BEAT_CONDITIONS or not is_valid_condition(ctype, cvalue, known_ids):
             ctype, cvalue = "referee", ""
-        if not beats and ctype == "location" and cvalue == campaign.starting_location_id:
+        if ctype == "location" and cvalue == campaign.starting_location_id:
             ctype, cvalue = "referee", ""
         beats.append(StoryBeat(len(beats) + 1, title, objective, ctype, cvalue))
 

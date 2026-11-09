@@ -382,3 +382,15 @@ def test_generate_options_follows_model_categories_and_sorts_to_slots():
     r = calls.generate_options(client, narration="n", categories=CATS, state_block="s")
     assert [o.category for o in r.options] == CATS
     assert r.options[0].text == "Search for the bell"
+
+
+def test_a_later_beat_aimed_at_the_starting_location_is_downgraded():
+    reply = beats_reply(
+        {"title": "Enter", "objective": "Go in.", "condition_type": "location", "condition_value": "cave"},
+        {"title": "Return", "objective": "Come back.", "condition_type": "location", "condition_value": "ferry"},
+        {"title": "Win", "objective": "Win."},
+    )
+    client, _ = client_with(reply)
+    beats = calls.derive_beats(client, campaign=CAMPAIGN, locations=LOCS)
+    assert (beats[0].condition_type, beats[0].condition_value) == ("location", "cave")
+    assert (beats[1].condition_type, beats[1].condition_value) == ("referee", "")

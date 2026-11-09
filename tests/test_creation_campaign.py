@@ -53,14 +53,33 @@ def test_everything_is_optional():
 
 # --- checklist ---------------------------------------------------------------------------------
 
-def test_merge_checklist_adds_but_never_erases():
-    first = merge_checklist({}, CampaignChecklist(setting_description="  A  swamp. "))
-    assert first == {"setting_description": "A swamp."}
-    second = merge_checklist(first, CampaignChecklist(primary_threat="A witch.", setting_description=None))
-    assert second == {"setting_description": "A swamp.", "primary_threat": "A witch."}
-    assert merge_checklist(second, None) == second
-    assert pending(second) == ["starting_quest_hook"]
-    assert pending({k: "x" for k in cc.CHECKLIST_KEYS}) == []
+SRC = "I want a fog-choked marsh. The Swamp Witch is the threat. Children went silent overnight."
+EVERYTHING = CampaignChecklist(
+    setting_description="A fog-choked marsh.",
+    primary_threat="The Swamp Witch.",
+    starting_quest_hook="Children went silent.",
+)
+
+
+def test_merge_checklist_accepts_one_grounded_field_per_turn():
+    first = merge_checklist({}, EVERYTHING, SRC)
+    assert first == {"setting_description": "A fog-choked marsh."}
+    second = merge_checklist(first, EVERYTHING, SRC)
+    assert list(second) == ["setting_description", "primary_threat"]
+    third = merge_checklist(second, EVERYTHING, SRC)
+    assert pending(third) == []
+    assert merge_checklist(third, None, SRC) == third
+    changed = CampaignChecklist(setting_description="Something else entirely different")
+    assert merge_checklist(third, changed, SRC) == third          # settled values are never replaced
+
+
+def test_merge_checklist_rejects_fragments_and_invented_values():
+    # the real failure: one answer filled all three fields with fragments
+    src = "dark mystery decaying ruins"
+    assert merge_checklist({}, CampaignChecklist(setting_description="dark"), src) == {}
+    assert merge_checklist({}, CampaignChecklist(setting_description="decaying ruins"), src) == {}
+    assert merge_checklist({}, CampaignChecklist(setting_description="A frozen northern citadel"), "I like marsh") == {}
+    assert merge_checklist({}, CampaignChecklist(primary_threat="The Swamp Witch."), SRC) == {}   # not the first pending
 
 
 # --- normalising model output ------------------------------------------------------------------
@@ -213,10 +232,26 @@ CHECKLIST = js(setting_description="A fog-choked marsh.", primary_threat="The Sw
                starting_quest_hook="Children went silent.")
 
 
+# Four chat turns: the checklist now fills one field per turn (setting, threat, hook).
+CHAT_INPUTS = [
+    "I want a fog-choked marsh",
+    "The Swamp Witch is the threat",
+    "Children went silent overnight",
+    "Yes that hook",
+]
+CHAT_RESPONSES = [
+    "Guide: pick a setting. A) Marsh B) Desert C) Tundra D) Other",
+    CHECKLIST,
+    "Guide: pick a threat. A) Witch B) Dragon C) Cult D) Other",
+    CHECKLIST,
+    "Guide: pick a hook. A) Silence B) Plague C) War D) Other",
+    CHECKLIST,
+]
+
+
 def test_full_run_creates_a_complete_campaign(tmp_path):
     responses = [
-        "A) Swamp B) Desert C) Tundra D) Other",
-        CHECKLIST,
+        *CHAT_RESPONSES,
         js(theme_vibe="Gothic Dark Fantasy", starting_patron="Mother Hesk, the ferry-keeper",
            suggested_names=["The Drowned Bell", "Marsh Song", "Silent Fog"]),
         js(beginning="It begins.", middle=["Complication one.", "Complication two."], end="It ends.",
@@ -230,7 +265,7 @@ def test_full_run_creates_a_complete_campaign(tmp_path):
         ]),
         js(beats=[{"title": f"Beat {i}", "objective": f"Do {i}."} for i in range(1, 5)]),
     ]
-    creator, out = make_creator(tmp_path, responses, ["A swamp", "witch and silent children", "1"])
+    creator, out = make_creator(tmp_path, responses, [*CHAT_INPUTS, "1"])
     assert creator.run() == "the_drowned_bell"
 
     db = GameDB.open("the_drowned_bell", tmp_path)
@@ -255,7 +290,7 @@ def test_complete_with_items_pending_keeps_chatting_and_cancel_leaves(tmp_path):
 
 
 def test_garbage_from_the_model_still_creates_a_playable_campaign(tmp_path):
-    creator, _ = make_creator(tmp_path, ["hi", CHECKLIST, "garbage"], ["A swamp", "witch", "1"])
+    creator, _ = make_creator(tmp_path, [*CHAT_RESPONSES, "garbage"], [*CHAT_INPUTS, "1"])
     slug = creator.run()
     assert slug == "an_unknown_journey"
     db = GameDB.open(slug, tmp_path)
@@ -267,7 +302,7 @@ def test_garbage_from_the_model_still_creates_a_playable_campaign(tmp_path):
 
 def test_two_campaigns_with_the_same_name_get_different_slots(tmp_path):
     for _ in range(2):
-        creator, _ = make_creator(tmp_path, ["hi", CHECKLIST, "garbage"], ["A swamp", "witch", "1"])
+        creator, _ = make_creator(tmp_path, [*CHAT_RESPONSES, "garbage"], [*CHAT_INPUTS, "1"])
         creator.run()
     assert sorted(GameDB.list_campaigns(tmp_path)) == ["an_unknown_journey", "an_unknown_journey_2"]
 
@@ -275,9 +310,20 @@ def test_two_campaigns_with_the_same_name_get_different_slots(tmp_path):
 def test_prettify_name():
     assert prettify_name("cult_haven") == "Cult Haven"
     assert prettify_name("chapel") == "Chapel"
+    assert prettify_name("everwood's laboratory") == "Everwood's Laboratory"
+    assert prettify_name("oakwood manor - fall of the scholar") == "Oakwood Manor"
     assert prettify_name("Old Mill") == "Old Mill"
     assert prettify_name("McGrath") == "McGrath"
     assert prettify_name("  ") == ""
+
+
+def test_lowercase_names_get_title_case_and_suffixes_are_trimmed():
+    w = build_world(draft(
+        {"id": "oakwood_manor_fall", "name": "oakwood manor - fall of the scholar", "connections": ["lab"]},
+        {"id": "lab", "name": "everwood's laboratory", "connections": ["hall"]},
+        {"id": "hall", "name": "darkened hallway"},
+    ))
+    assert [l.name for l in w.locations] == ["Oakwood Manor", "Everwood's Laboratory", "Darkened Hallway"]
 
 
 def test_names_that_are_just_ids_become_titles():
