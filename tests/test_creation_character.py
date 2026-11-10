@@ -16,6 +16,7 @@ from aether.creation.character import (
     rules_text,
     save_character,
     starting_items,
+    apply_choice,
 )
 from aether.db import GameDB
 from aether.llm.client import LLMClient
@@ -228,3 +229,52 @@ def test_missing_campaign_and_existing_player_are_reported(tmp_path):
     save_character("camp", name="Aria", race="Elf", char_class="Ranger", backstory="x", campaigns_dir=tmp_path)
     creator, out = make_creator(tmp_path, ["x"], [])
     assert creator.run() is None and any("already has a player" in line for line in out)
+
+
+INFO = CampaignInfo(name="Camp", slug="camp", setting_description="A marsh.", primary_threat="A witch.",
+                    starting_quest_hook="Find the bell.")
+
+
+def test_apply_choice_fills_only_the_next_pending_item():
+    base = {"name": "Aria"}
+    assert apply_choice(base, "Elf: nimble")["race"] == "Elf"
+    assert "race" not in apply_choice(base, "Sneaky types")
+    core = {"name": "Aria", "race": "Elf", "char_class": "Ranger"}
+    assert apply_choice(core, "Aria lost her squad in the fog and seeks atonement.")["backstory"].startswith("Aria lost")
+    assert "backstory" not in apply_choice(core, "A scout")
+    assert apply_choice({}, "Aria: a name") == {}             # names go through the extractor
+
+
+def test_guide_prompt_asks_about_one_item_only():
+    system = guide_messages(INFO, {"name": "Baron", "race": "Human"}, [])[0]["content"]
+    assert "Ask ONLY about the player's class" in system
+    done = {"name": "Baron", "race": "Human", "char_class": "Rogue"}
+    system = guide_messages(INFO, done, [])[0]["content"]
+    assert "Ask ONLY about the player's backstory" in system and "Do NOT write a full backstory" in system
+
+
+def test_menu_choices_fill_the_checklist_without_extraction_and_finish_at_once(tmp_path):
+    make_campaign(tmp_path)
+    responses = [
+        js(name="Aria"),
+        "Guide: pick a race.\nA) Human: versatile\nB) Elf: nimble\nC) Dwarf: hardy\nD) Something else",
+        "Guide: pick a class.\nA) Fighter: tough\nB) Rogue: sneaky\nC) Ranger: a hunter\nD) Something else",
+        "Guide: pick a backstory.\nA) Aria lost her squad in the fog and seeks atonement.\n"
+        "B) Aria fled a burning city.\nC) Aria is a wandering scout.\nD) Something else",
+    ]
+    creator, out = make_creator(tmp_path, responses, ["My name is Aria", "b", "c", "a"])
+    assert creator.run() is not None
+    assert len(creator.client._backend.calls) == 4     # no extraction for letters, no guide call after the last pick
+    with GameDB.open("camp", tmp_path) as db:
+        player = db.get_player()
+        assert (player.race, player.char_class) == ("Elf", "Ranger")
+        assert player.backstory == "Aria lost her squad in the fog and seeks atonement."
+
+
+def test_something_else_asks_for_typed_input(tmp_path):
+    make_campaign(tmp_path)
+    responses = [js(name="Aria"), "Guide: pick a race.\nA) Human: v\nB) Elf: n\nC) Dwarf: h\nD) Something else"]
+    creator, out = make_creator(tmp_path, responses, ["My name is Aria", "d", "cancel"])
+    assert creator.run() is None
+    assert any("type your own answer" in line for line in out)
+    assert len(creator.client._backend.calls) == 2

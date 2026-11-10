@@ -17,6 +17,8 @@ Run it on its own:  python -m aether.creation.campaign
 
 from __future__ import annotations
 
+import re
+import random
 import shutil
 from collections import deque
 from dataclasses import dataclass
@@ -27,6 +29,8 @@ from string import capwords
 from pydantic import BaseModel, Field, field_validator
 
 from aether.db import GameDB, slugify
+from aether.creation.menus import CUSTOM_CHOICE, last_assistant_reply, resolve_choice
+from aether.creation.names import pick_patron_name
 from aether.llm import calls
 from aether.llm.client import LLMClient, LLMError, Messages
 from aether.models import CampaignInfo, Location, StoryBeat
@@ -51,6 +55,8 @@ STORYLINE_MAX_TOKENS = 900
 MAP_MAX_TOKENS = 900
 
 FALLBACK_NAMES = ("An Unknown Journey", "Echoes of Adventure", "Tales of the Unknown")
+DEFAULT_PATRON_ROLE = "a local guide"
+_ARTICLES = ("a", "an", "the", "old", "young")
 
 
 # --- schemas ---------------------------------------------------------------------------------
@@ -75,10 +81,10 @@ class CampaignChecklist(BaseModel):
 
 class DerivedMetadata(BaseModel):
     theme_vibe: str = ""
-    starting_patron: str = ""
+    patron_role: str = ""       # the role only; the name is chosen in code
     suggested_names: List[str] = Field(default_factory=list)
 
-    @field_validator("theme_vibe", "starting_patron", mode="before")
+    @field_validator("theme_vibe", "patron_role", mode="before")
     @classmethod
     def _text(cls, value):
         return _joined(value)
@@ -157,17 +163,17 @@ def checklist_messages(history: Sequence[Dict[str, str]]) -> Messages:
     return [{"role": "system", "content": system}, *history[-4:]]
 
 
-def metadata_messages(checklist: Dict[str, str]) -> Messages:
+def metadata_messages(checklist: Dict[str, str], patron_name: str) -> Messages:
     system = "\n".join(
         [
             "You name and style a role-playing campaign.",
             "- theme_vibe: a 2 to 3 word genre tag.",
-            "- starting_patron: one named character who helps the player at the start, written as "
-            "'<Name>, <role>'.",
+            f"- patron_role: the role of {patron_name}, a character who helps the player at the start, "
+            "2 to 5 words, for example 'a retired ferry-keeper'. Do not write the name.",
             f"- suggested_names: exactly {NAME_COUNT} atmospheric campaign names that fit the setting.",
             "",
             "Reply as JSON in this shape (replace the <placeholders>):",
-            '{"theme_vibe":"<genre tag>","starting_patron":"<Name>, <role>",'
+            '{"theme_vibe":"<genre tag>","patron_role":"<role without a name>",'
             '"suggested_names":["<name 1>","<name 2>","<name 3>"]}',
         ]
     )
@@ -260,7 +266,7 @@ def status_line(checklist: Dict[str, str]) -> str:
 def normalize_metadata(resp: Optional[DerivedMetadata]) -> DerivedMetadata:
     """Fill gaps with defaults and make sure there are exactly NAME_COUNT clean names."""
     vibe = _clip(resp.theme_vibe, 40) if resp else ""
-    patron = _clip(resp.starting_patron, 100) if resp else ""
+    role = _clip(resp.patron_role, 60) if resp else ""
     names: List[str] = []
     for raw in (resp.suggested_names if resp else []):
         name = " ".join(str(raw).split()).strip(" \"'")[:60]
@@ -273,9 +279,42 @@ def normalize_metadata(resp: Optional[DerivedMetadata]) -> DerivedMetadata:
             names.append(fallback)
     return DerivedMetadata(
         theme_vibe=vibe or "Heroic Fantasy",
-        starting_patron=patron or "Old Tam, a local tavern owner",
+        patron_role=role or DEFAULT_PATRON_ROLE,
         suggested_names=names[:NAME_COUNT],
     )
+    
+
+def compose_patron(name: str, role: str) -> str:
+    """'Odalric Venn' + 'a retired ferry-keeper' -> 'Odalric Venn, a retired ferry-keeper'.
+
+    If the model wrote a name anyway ('Kaelin, a rebel'), it is dropped, so the
+    name always comes from the list.
+    """
+    role = " ".join((role or "").split())
+    role = re.sub(re.escape(name), "", role, flags=re.IGNORECASE)
+    if "," in role:
+        head, tail = role.split(",", 1)
+        words = head.split()
+        if words and len(words) <= 3 and all(w[0].isupper() for w in words) and words[0].lower() not in _ARTICLES:
+            role = tail
+    role = role.strip(" ,;:-.\"'")
+    return f"{name}, {role or DEFAULT_PATRON_ROLE}"
+
+
+def apply_choice(current: Dict[str, str], option: str) -> Dict[str, str]:
+    """Fill the first pending item straight from a chosen menu option, with no LLM call.
+
+    The guide asks about one pending item at a time, so the choice belongs to it.
+    A fragment of fewer than MIN_FIELD_WORDS words is ignored.
+    """
+    merged = dict(current)
+    missing = pending(merged)
+    if not missing:
+        return merged
+    text = _clip(option, 300)
+    if len(text.split()) >= MIN_FIELD_WORDS:
+        merged[missing[0]] = text
+    return merged
 
 
 def normalize_storyline(resp: Optional[Storyline], checklist: Dict[str, str], patron: str) -> Storyline:
@@ -453,6 +492,7 @@ class CampaignCreator:
         campaigns_dir: Optional[Path] = None,
         input_fn: Callable[[str], str] = input,
         print_fn: Callable[..., None] = print,
+        rng: Optional[random.Random] = None,
     ):
         self.client = client
         self.campaigns_dir = campaigns_dir
@@ -460,6 +500,7 @@ class CampaignCreator:
         self.print = print_fn
         self.history: List[Dict[str, str]] = []
         self.checklist: Dict[str, str] = {}
+        self.rng = rng or random.Random()
 
     def run(self) -> Optional[str]:
         """Run creation. Returns the new campaign's slug, or None if cancelled or failed."""
@@ -502,10 +543,19 @@ class CampaignCreator:
                 self.print(f"[System] Still pending: {labels}. Keep chatting to settle them.")
                 continue
 
-            self.history.append({"role": "user", "content": text})
-            if len(self.history) >= 2:
-                self._update_checklist()
+            choice = resolve_choice(text, last_assistant_reply(self.history))
+            if choice == CUSTOM_CHOICE:
+                self.print("[System] Go ahead and type your own answer.")
+                continue
+            if choice is not None:
+                self.history.append({"role": "user", "content": f"I choose: {choice}"})
+                self.checklist = apply_choice(self.checklist, choice)
                 self.print(status_line(self.checklist))
+            else:
+                self.history.append({"role": "user", "content": text})
+                if len(self.history) >= 2:
+                    self._update_checklist()
+                    self.print(status_line(self.checklist))
             if not pending(self.checklist):
                 self.print("\n[System] All core elements are settled.")
                 return True
@@ -544,9 +594,11 @@ class CampaignCreator:
         self.print("\nBuilding your campaign. This takes a few minutes on a CPU...")
 
         self.print("\n[1/5] Choosing a style and name suggestions...")
+        patron_name = pick_patron_name(self.rng)
         meta = normalize_metadata(
-            self._structured(metadata_messages(self.checklist), DerivedMetadata, METADATA_MAX_TOKENS, 0.8)
+            self._structured(metadata_messages(self.checklist, patron_name), DerivedMetadata, METADATA_MAX_TOKENS, 0.8)
         )
+        patron = compose_patron(patron_name, meta.patron_role)
         name = choose_name(meta.suggested_names, self.input, self.print)
         slug = GameDB.unique_slug(name, self.campaigns_dir)
         self.print(f"\nCampaign name: '{name}' (save slot: {slug})")
@@ -554,10 +606,10 @@ class CampaignCreator:
         self.print("\n[2/5] Writing the storyline...")
         story = normalize_storyline(
             self._structured(
-                storyline_messages(self.checklist, meta.starting_patron), Storyline, STORYLINE_MAX_TOKENS, 0.7
+                storyline_messages(self.checklist, patron), Storyline, STORYLINE_MAX_TOKENS, 0.7
             ),
             self.checklist,
-            meta.starting_patron,
+            patron,
         )
 
         self.print("\n[3/5] Designing the world map...")
@@ -572,7 +624,7 @@ class CampaignCreator:
             primary_threat=self.checklist["primary_threat"],
             starting_quest_hook=self.checklist["starting_quest_hook"],
             theme_vibe=meta.theme_vibe,
-            starting_patron=meta.starting_patron,
+            starting_patron=patron,
             storyline_beginning=story.beginning,
             storyline_middle=story.middle,
             storyline_end=story.end,

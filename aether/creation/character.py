@@ -26,6 +26,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from pydantic import BaseModel, field_validator
 
 from aether.db import GameDB, SchemaVersionError
+from aether.creation.menus import CUSTOM_CHOICE, last_assistant_reply, resolve_choice
 from aether.llm import calls
 from aether.llm.client import LLMClient, LLMError, Messages
 from aether.logic.stats import (
@@ -69,6 +70,16 @@ _BAD_NAMES = frozenset({"none", "null", "unknown", "n/a", "na", "player", "chara
 _RESERVED = frozenset(
     {r.lower() for r in RACES} | {c.lower() for c in CLASSES} | set(RACE_ALIASES)
 )
+
+FOCUS_INSTRUCTIONS = {
+    "name": "Offer three character name suggestions that fit the setting.",
+    "race": "Offer three races from the approved list.",
+    "char_class": "Offer three classes from the approved list.",
+    "backstory": (
+        "Offer three short backstory options, one or two sentences each (under 30 words), tied to the "
+        "campaign and to the chosen race and class. Do NOT write a full backstory and do NOT summarise the character."
+    ),
+}
 
 
 # --- schema ------------------------------------------------------------------------------------
@@ -138,6 +149,16 @@ def guide_messages(info: CampaignInfo, checklist: Dict[str, str], history: Seque
             return "PENDING"
         return "COMPLETED" if key == "backstory" else f"COMPLETED ({value})"
 
+    missing = pending(checklist)
+    focus = missing[0] if missing else None
+    focus_lines = []
+    if focus:
+        focus_lines = [
+            f"- Ask ONLY about the player's {CHECKLIST_LABELS[focus].lower()}. "
+            "Anything marked COMPLETED is final: never ask about it again.",
+            f"- {FOCUS_INSTRUCTIONS[focus]}",
+        ]
+
     system = "\n".join(
         [
             "You are the Character Creation Guide. Help the player build a character for this campaign.",
@@ -151,9 +172,9 @@ def guide_messages(info: CampaignInfo, checklist: Dict[str, str], history: Seque
             *(f"- {CHECKLIST_LABELS[k].lower()}: {status(k)}" for k in CHECKLIST_KEYS),
             "",
             "INSTRUCTIONS",
-            "- Focus on PENDING items. Ask about ONE item at a time, in this order: name, race, class, backstory.",
+            *focus_lines,
             "- Only offer races and classes from the approved lists.",
-            "- Backstory options must tie into the campaign above and suit the chosen race and class.",
+            "- Do not repeat or summarise what the player already chose.",
             "- Always present your question as a multiple-choice list in exactly this format:",
             "  A) [Suggestion 1]",
             "  B) [Suggestion 2]",
@@ -248,6 +269,33 @@ def merge_checklist(current: Dict[str, str], parsed: Optional[CharacterChecklist
     if "backstory" not in merged and all(k in merged for k in CORE_KEYS):
         text = _clip(parsed.backstory or "", BACKSTORY_MAX_CHARS)
         if len(text.split()) >= MIN_BACKSTORY_WORDS and calls.is_grounded(text, source):
+            merged["backstory"] = text
+    return merged
+
+
+def apply_choice(current: Dict[str, str], option: str) -> Dict[str, str]:
+    """Fill the next pending item straight from a chosen option, with no LLM call.
+
+    Race and class must name a real one (looked at before the colon). A backstory
+    option needs MIN_BACKSTORY_WORDS. Names are left to the extractor.
+    """
+    merged = dict(current)
+    missing = pending(merged)
+    if not missing:
+        return merged
+    key = missing[0]
+    head = option.split(":", 1)[0]
+    if key == "race":
+        race = find_choice(head, RACES, RACE_ALIASES)
+        if race:
+            merged["race"] = race
+    elif key == "char_class":
+        char_class = find_choice(head, CLASSES)
+        if char_class:
+            merged["char_class"] = char_class
+    elif key == "backstory":
+        text = _clip(option, BACKSTORY_MAX_CHARS)
+        if len(text.split()) >= MIN_BACKSTORY_WORDS:
             merged["backstory"] = text
     return merged
 
@@ -373,8 +421,20 @@ class CharacterCreator:
                 self.print(f"[System] Still pending: {labels}. Keep chatting to settle them.")
                 continue
 
-            self.history.append({"role": "user", "content": text})
-            self._update_checklist()
+            choice = resolve_choice(text, last_assistant_reply(self.history))
+            if choice == CUSTOM_CHOICE:
+                self.print("[System] Go ahead and type your own answer.")
+                continue
+
+            if choice is not None:
+                self.history.append({"role": "user", "content": f"I choose: {choice}"})
+                before = dict(self.checklist)
+                self.checklist = apply_choice(self.checklist, choice)
+                if self.checklist == before:          # e.g. a name option: let the extractor read it
+                    self._update_checklist()
+            else:
+                self.history.append({"role": "user", "content": text})
+                self._update_checklist()
             self.print(status_line(self.checklist))
             if not pending(self.checklist):
                 self.print("\n[System] All core traits are settled.")
