@@ -368,8 +368,8 @@ def beats_messages(
         f"Write between {min_beats} and {max_beats} beats, in the order they should happen. "
         "The last beat is the final victory.",
         f"The player starts at {start} and already knows the quest hook, so beat 1 must be "
-        "Refer to the hero as \"the player\", never by a name.",
         "something still ahead of them, not arriving or learning the hook.",
+        "Refer to the hero as \"the player\", never by a name.",
         "",
         "Each beat has:",
         "- title: two to five words.",

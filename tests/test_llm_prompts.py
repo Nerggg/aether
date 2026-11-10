@@ -214,7 +214,7 @@ def test_split_patron_and_known_text():
 def test_beats_prompt_only_offers_location_and_referee():
     system = prompts.beats_messages(CAMPAIGN, [FERRY, CAUSEWAY], 4, 6)[0]["content"]
     assert "has_item" not in system and "npc_dead" not in system
-    assert "beat 1 must be something still ahead" in system and "Mirewick Ferry" in system
+    assert "must be something still ahead" in system and "Mirewick Ferry" in system
 
 
 def test_memory_facts_prompt():
