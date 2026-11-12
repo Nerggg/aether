@@ -65,6 +65,7 @@ IDEA_MAX_CHARS = 200      # one idea
 
 FIELD_OPTIONS_MAX_TOKENS = 350
 METADATA_MAX_TOKENS = 300
+NAMES_MAX_TOKENS = 150
 STORYLINE_MAX_TOKENS = 900
 MAP_MAX_TOKENS = 900
 
@@ -121,6 +122,10 @@ class DerivedMetadata(BaseModel):
     @classmethod
     def _text(cls, value):
         return _joined(value)
+
+
+class NameSuggestions(BaseModel):
+    suggested_names: List[str] = Field(default_factory=list)
 
 
 class Storyline(BaseModel):
@@ -203,6 +208,27 @@ def metadata_messages(checklist: Dict[str, str], patron_name: str) -> Messages:
         ]
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": _facts(checklist)}]
+
+
+def names_messages(checklist: Dict[str, str], ideas: Sequence[str], avoid: Sequence[str]) -> Messages:
+    """Ask for new campaign names, built around the player's naming ideas."""
+    system = "\n".join(
+        [
+            "You name a role-playing campaign.",
+            f"Write exactly {NAME_COUNT} atmospheric campaign names that fit the setting.",
+            "- Build the names around the player's ideas when they give any.",
+            "- Do not reuse any name from the 'Do not reuse' list.",
+            "",
+            "Reply as JSON in this shape (replace the <placeholders>):",
+            '{"suggested_names":["<name 1>","<name 2>","<name 3>"]}',
+        ]
+    )
+    lines = [_facts(checklist)]
+    if ideas:
+        lines.append("Player's ideas for the name: " + _clip_tail("; ".join(ideas), IDEAS_MAX_CHARS))
+    if avoid:
+        lines.append("Do not reuse: " + ", ".join(avoid))
+    return [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(lines)}]
 
 
 def storyline_messages(checklist: Dict[str, str], patron: str) -> Messages:
@@ -302,25 +328,48 @@ def generate_field_options(
     return result[:count]
 
 
+def clean_names(raw: Sequence[str], count: int = NAME_COUNT, exclude: Sequence[str] = ()) -> List[str]:
+    """Exactly `count` distinct, tidy names. Names in `exclude` are skipped, and built-in
+    names fill any gap (reusing an excluded one only as a last resort)."""
+    banned = {str(e).strip().lower() for e in exclude}
+    names: List[str] = []
+
+    def add(candidate, skip_banned: bool) -> None:
+        name = " ".join(str(candidate).split()).strip(" \"'")[:60]
+        low = name.lower()
+        if not name or low in {n.lower() for n in names} or (skip_banned and low in banned):
+            return
+        names.append(name)
+
+    for candidate in raw:
+        add(candidate, True)
+    for skip_banned in (True, False):
+        for fallback in FALLBACK_NAMES:
+            if len(names) < count:
+                add(fallback, skip_banned)
+    return names[:count]
+
+
 def normalize_metadata(resp: Optional[DerivedMetadata]) -> DerivedMetadata:
     """Fill gaps with defaults and make sure there are exactly NAME_COUNT clean names."""
     vibe = _clip(resp.theme_vibe, 40) if resp else ""
     role = _clip(resp.patron_role, 60) if resp else ""
-    names: List[str] = []
-    for raw in (resp.suggested_names if resp else []):
-        name = " ".join(str(raw).split()).strip(" \"'")[:60]
-        if name and name.lower() not in {n.lower() for n in names}:
-            names.append(name)
-    for fallback in FALLBACK_NAMES:
-        if len(names) >= NAME_COUNT:
-            break
-        if fallback.lower() not in {n.lower() for n in names}:
-            names.append(fallback)
     return DerivedMetadata(
         theme_vibe=vibe or "Heroic Fantasy",
         patron_role=role or DEFAULT_PATRON_ROLE,
-        suggested_names=names[:NAME_COUNT],
+        suggested_names=clean_names(resp.suggested_names if resp else []),
     )
+
+
+def generate_names(
+    client: LLMClient, checklist: Dict[str, str], ideas: Sequence[str], avoid: Sequence[str]
+) -> List[str]:
+    """New campaign names shaped by the player's ideas, never repeating `avoid`."""
+    response = client.structured(
+        "referee", names_messages(checklist, ideas, avoid), NameSuggestions,
+        max_tokens=NAMES_MAX_TOKENS, temperature=0.8,
+    )
+    return clean_names(response.suggested_names if response else [], NAME_COUNT, exclude=avoid)
 
 
 def compose_patron(name: str, role: str) -> str:
@@ -461,23 +510,44 @@ def build_world(draft: Optional[WorldMapDraft]) -> World:
     return World([location for location, _ in entries], pairs)
 
 
-def choose_name(names: Sequence[str], input_fn: Callable[[str], str], print_fn: Callable[[str], None]) -> str:
-    """Let the player pick a suggested name or type their own. Bad input picks the first."""
-    print_fn("\nSelect a Campaign Name from the suggested options:")
-    for i, name in enumerate(names, start=1):
-        print_fn(f"{i}. {name}")
-    custom = len(names) + 1
-    print_fn(f"{custom}. Input a custom name")
-    raw = input_fn(f"\nSelect (1-{custom}): ").strip()
-    if raw.isdigit():
-        n = int(raw)
-        if 1 <= n <= len(names):
-            return names[n - 1]
-        if n == custom:
-            typed = input_fn("Enter custom name: ").strip()
-            if typed:
-                return typed[:60]
-    return names[0]
+def choose_name(
+    names: Sequence[str],
+    input_fn: Callable[[str], str],
+    print_fn: Callable[[str], None],
+    regenerate: Optional[Callable[[str], Sequence[str]]] = None,
+) -> str:
+    """Let the player pick a suggested name or type their own.
+
+    With `regenerate`, anything that is not a menu number is an idea: it is passed to
+    `regenerate`, which returns new suggestions, and the menu is shown again. Without
+    it, bad input picks the first name.
+    """
+    names = list(names)
+    while True:
+        print_fn("\nSelect a Campaign Name from the suggested options:")
+        for i, name in enumerate(names, start=1):
+            print_fn(f"{i}. {name}")
+        custom = len(names) + 1
+        print_fn(f"{custom}. Input a custom name")
+        prompt = f"\nSelect (1-{custom}) or type an idea for new names: " if regenerate else f"\nSelect (1-{custom}): "
+        raw = input_fn(prompt).strip()
+
+        if raw.isdigit():
+            n = int(raw)
+            if 1 <= n <= len(names):
+                return names[n - 1]
+            if n == custom:
+                typed = input_fn("Enter custom name: ").strip()
+                return typed[:60] if typed else names[0]
+            if regenerate is None:
+                return names[0]
+            print_fn(f"[System] Pick a number from 1 to {custom}, or type an idea for new names.")
+            continue
+        if regenerate is None:
+            return names[0]
+        if not raw:
+            continue
+        names = list(regenerate(raw)) or names
 
 
 def save_campaign(
@@ -631,7 +701,23 @@ class CampaignCreator:
             self._structured(metadata_messages(self.values, patron_name), DerivedMetadata, METADATA_MAX_TOKENS, 0.8)
         )
         patron = compose_patron(patron_name, meta.patron_role)
-        name = choose_name(meta.suggested_names, self.input, self.print)
+        name_ideas: List[str] = []
+        shown = list(meta.suggested_names)
+
+        def more_names(text: str) -> List[str]:
+            idea = _clip(text, IDEA_MAX_CHARS)
+            if idea:
+                name_ideas.append(idea)
+            fresh = generate_names(self.client, self.values, name_ideas, shown)
+            shown.extend(fresh)
+            return fresh
+
+        name = choose_name(
+            meta.suggested_names,
+            lambda prompt: self._read(prompt, allow_empty=True),
+            self.print,
+            regenerate=more_names,
+        )
         slug = GameDB.unique_slug(name, self.campaigns_dir)
         self.print(f"\nCampaign name: '{name}' (save slot: {slug})")
 

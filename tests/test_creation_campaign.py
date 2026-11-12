@@ -453,3 +453,51 @@ def test_nothing_typed_ever_becomes_a_field_value(tmp_path):
     )
     assert creator.run() is None
     assert creator.values == {} and creator.ideas == [long_text]
+
+
+def test_clean_names():
+    assert cc.clean_names(['"One"', "one", "", "Two", "Three", "Four"]) == ["One", "Two", "Three"]
+    assert cc.clean_names([]) == list(cc.FALLBACK_NAMES)
+    got = cc.clean_names(["New"], exclude=["An Unknown Journey"])
+    assert got[0] == "New" and "An Unknown Journey" not in got and len(got) == 3
+    assert len(cc.clean_names([], exclude=list(cc.FALLBACK_NAMES))) == 3     # last resort reuses them
+
+
+def test_names_prompt_carries_ideas_and_names_to_avoid():
+    msgs = cc.names_messages({"setting_description": "A marsh."}, ["something salty"], ["Marsh Song"])
+    assert "exactly 3 atmospheric" in msgs[0]["content"]
+    assert "Player's ideas for the name: something salty" in msgs[1]["content"]
+    assert "Do not reuse: Marsh Song" in msgs[1]["content"]
+
+
+def test_choose_name_regenerates_for_anything_that_is_not_a_number():
+    seen = []
+
+    def more(text):
+        seen.append(text)
+        return ["Four", "Five", "Six"]
+
+    quiet = lambda *a, **k: None
+    # idea -> new names; empty input and an out-of-range number just re-show the menu
+    assert choose_name(["One", "Two", "Three"], ask("salty sea", "", "9", "2"), quiet, regenerate=more) == "Five"
+    assert seen == ["salty sea"]
+    assert choose_name(["One", "Two", "Three"], ask("4", "My Own"), quiet, regenerate=more) == "My Own"
+    assert choose_name(["One", "Two", "Three"], ask("4", " "), quiet, regenerate=more) == "One"
+
+
+def test_typing_an_idea_at_the_name_prompt_writes_new_names(tmp_path):
+    responses = [OPTS_A, OPTS_THREAT, OPTS_HOOK, BUILD[0],
+                 js(suggested_names=["Salt Crown", "Tide Song", "Grey Bell"]),
+                 BUILD[1], BUILD[2], BUILD[3]]
+    creator, out = make_creator(tmp_path, responses, ["", "1", "2", "3", "something with salt", "2"])
+    assert creator.run() == "tide_song"
+    prompt = creator.client._backend.calls[4]["messages"][1]["content"]
+    assert "something with salt" in prompt
+    assert "Do not reuse: The Drowned Bell, Marsh Song, Silent Fog" in prompt
+
+
+def test_cancel_works_at_the_name_prompt(tmp_path):
+    responses = [OPTS_A, OPTS_THREAT, OPTS_HOOK, BUILD[0]]
+    creator, out = make_creator(tmp_path, responses, ["", "1", "2", "3", "cancel"])
+    assert creator.run() is None
+    assert GameDB.list_campaigns(tmp_path) == []

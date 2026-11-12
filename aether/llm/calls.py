@@ -445,6 +445,52 @@ def compact_history(
 
 # --- story beats (used by campaign creation) -------------------------------------------------------------
 
+_TRAVEL = re.compile(
+    r"\b(?:reach\w*|travel\w*|arriv\w*|enter\w*|cross\w*|journey\w*|descend\w*|ascend\w*|"
+    r"head(?:s|ed|ing)?|walk\w*|go(?:es|ing)?|make your way|find the way)\b",
+    re.IGNORECASE,
+)
+_ACTION = re.compile(
+    r"\b(?:defeat\w*|fight\w*|surviv\w*|confront\w*|infiltrat\w*|retriev\w*|gather\w*|destroy\w*|"
+    r"kill\w*|rescu\w*|uncover\w*|investigat\w*|convinc\w*|persuad\w*|negotiat\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def is_travel_objective(objective: str) -> bool:
+    """True if the objective is a pure travel milestone ('Cross the causeway to reach the village').
+
+    It needs a travel word and no action word, because arriving somewhere does not
+    prove the player fought, sneaked or gathered anything there.
+    """
+    return bool(_TRAVEL.search(objective)) and not _ACTION.search(objective)
+
+
+def _stems(text: str) -> set:
+    return {
+        _norm(w)[:5] for w in _WORD.findall(text)
+        if len(_norm(w)) >= 4 and _norm(w) not in _STOPWORDS
+    }
+
+
+def move_victory_beat_last(beats: Sequence[StoryBeat], victory_condition: str) -> List[StoryBeat]:
+    """Put the beat that matches the victory condition at the end.
+
+    The model sometimes writes a beat after the win. The match is by shared content
+    words (at least 2, and at least 40% of the victory condition's words). When the
+    last beat ties with an earlier one, the last wins, so a correct order is untouched.
+    """
+    beats = list(beats)
+    victory = _stems(victory_condition)
+    if len(beats) < 2 or not victory:
+        return beats
+    scores = [len(victory & _stems(f"{b.title} {b.objective}")) for b in beats]
+    best = max(range(len(beats)), key=lambda i: (scores[i], i))
+    if best == len(beats) - 1 or scores[best] < 2 or scores[best] / len(victory) < 0.4:
+        return beats
+    return beats[:best] + beats[best + 1:] + [beats[best]]
+
+
 def fallback_beats(campaign: CampaignInfo) -> List[StoryBeat]:
     """Three plain beats from the storyline text, used when the model fails."""
     def clip(text: str, default: str) -> str:
@@ -467,9 +513,16 @@ def derive_beats(
 ) -> List[StoryBeat]:
     """4-6 story beats from the storyline, with every condition validated.
 
-    A condition the code cannot check (an invented location id, an empty
-    value) is downgraded to the 'referee' kind. If the model fails, three
-    plain fallback beats are returned, so campaign creation never stops here.
+    * a condition the code cannot check (an invented location id, an empty value)
+      becomes 'referee'
+    * a 'location' beat survives only if it targets somewhere other than the start
+      and its objective is a pure travel milestone (`is_travel_objective`)
+    * the beat matching the victory condition is moved to the end, and the final
+      beat is never a 'location' beat
+    * a 'referee' beat with no condition text gets its objective as the condition
+
+    If the model fails, three plain fallback beats are returned, so campaign
+    creation never stops here.
     """
     gameplay = client.config.gameplay
     known_ids = {l.id for l in locations}
@@ -487,13 +540,23 @@ def derive_beats(
         if ctype not in ALLOWED_BEAT_CONDITIONS or not is_valid_condition(ctype, cvalue, known_ids):
             ctype, cvalue = "referee", ""
         if ctype == "location" and cvalue == campaign.starting_location_id:
-            ctype, cvalue = "referee", ""
+            ctype, cvalue = "referee", ""       # would complete the moment it activates
+        if ctype == "location" and not is_travel_objective(objective):
+            ctype, cvalue = "referee", ""       # arriving does not prove the objective was done
         beats.append(StoryBeat(len(beats) + 1, title, objective, ctype, cvalue))
+
+    beats = move_victory_beat_last(beats, campaign.victory_condition)
+    for i, beat in enumerate(beats, start=1):
+        beat.position = i
 
     # The final beat is the victory. A pure travel milestone there would finish
     # the moment the previous beat does, because the confrontation happens at that place.
     if beats and beats[-1].condition_type == "location":
         beats[-1].condition_type, beats[-1].condition_value = "referee", ""
+
+    for beat in beats:
+        if beat.condition_type == "referee" and not beat.condition_value.strip():
+            beat.condition_value = beat.objective
 
     if len(beats) < 2:
         return fallback_beats(campaign)

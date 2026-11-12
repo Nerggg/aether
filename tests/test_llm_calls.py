@@ -311,11 +311,11 @@ def test_derive_beats_keeps_valid_conditions_and_downgrades_bad_ones():
     client, _ = client_with(reply)
     beats = calls.derive_beats(client, campaign=CAMPAIGN, locations=LOCS)
     assert [b.position for b in beats] == [1, 2, 3, 4, 5, 6]
-    assert (beats[0].condition_type, beats[0].condition_value) == ("referee", "")   # would complete instantly
+    assert (beats[0].condition_type, beats[0].condition_value) == ("referee", "Be at the ferry.")   # would complete instantly
     assert (beats[1].condition_type, beats[1].condition_value) == ("location", "cave")
-    assert beats[2].condition_type == "referee"                                     # invented id
-    assert (beats[3].condition_type, beats[3].condition_value) == ("referee", "")   # has_item is not allowed any more
-    assert (beats[4].condition_type, beats[4].condition_value) == ("referee", "")   # npc_dead neither
+    assert (beats[2].condition_type, beats[2].condition_value) == ("referee", "Go to Atlantis.")    # invented id
+    assert (beats[3].condition_type, beats[3].condition_value) == ("referee", "Hold the key.")      # has_item is not allowed
+    assert (beats[4].condition_type, beats[4].condition_value) == ("referee", "No value.")          # npc_dead neither
     assert beats[5].condition_value == "Witch defeated"
     assert all(b.status == "pending" for b in beats)
 
@@ -393,7 +393,7 @@ def test_a_later_beat_aimed_at_the_starting_location_is_downgraded():
     client, _ = client_with(reply)
     beats = calls.derive_beats(client, campaign=CAMPAIGN, locations=LOCS)
     assert (beats[0].condition_type, beats[0].condition_value) == ("location", "cave")
-    assert (beats[1].condition_type, beats[1].condition_value) == ("referee", "")
+    assert (beats[1].condition_type, beats[1].condition_value) == ("referee", "Come back.")
 
 
 def test_the_final_beat_is_never_a_travel_beat():
@@ -404,4 +404,46 @@ def test_the_final_beat_is_never_a_travel_beat():
     client, _ = client_with(reply)
     beats = calls.derive_beats(client, campaign=CAMPAIGN, locations=LOCS)
     assert (beats[0].condition_type, beats[0].condition_value) == ("location", "cave")
-    assert (beats[1].condition_type, beats[1].condition_value) == ("referee", "")
+    assert (beats[1].condition_type, beats[1].condition_value) == ("referee", "Finish.")
+
+
+def test_is_travel_objective():
+    assert calls.is_travel_objective("Cross the causeway to reach the village.")
+    assert calls.is_travel_objective("Enter the Undercroft.")
+    assert not calls.is_travel_objective("Infiltrate Cult Haven undetected.")
+    assert not calls.is_travel_objective("Travel to the temple and defeat the priestess.")
+    assert not calls.is_travel_objective("Explore the ruins and learn their secrets.")
+
+
+def test_a_location_beat_with_an_action_objective_becomes_referee():
+    reply = beats_reply(
+        {"title": "Cult Haven", "objective": "Infiltrate the cave undetected.",
+         "condition_type": "location", "condition_value": "cave"},
+        {"title": "Reach the cave", "objective": "Reach the cave.",
+         "condition_type": "location", "condition_value": "cave"},
+        {"title": "Win", "objective": "Win."},
+    )
+    client, _ = client_with(reply)
+    beats = calls.derive_beats(client, campaign=CAMPAIGN, locations=LOCS)
+    assert (beats[0].condition_type, beats[0].condition_value) == ("referee", "Infiltrate the cave undetected.")
+    assert (beats[1].condition_type, beats[1].condition_value) == ("location", "cave")
+
+
+def test_the_victory_beat_is_moved_to_the_end_and_positions_are_renumbered():
+    reply = beats_reply(
+        {"title": "Defeat the Witch", "objective": "Defeat the witch in her lair."},
+        {"title": "Gorge", "objective": "Cross the gorge."},
+        {"title": "Camp", "objective": "Rest."},
+    )
+    client, _ = client_with(reply)
+    beats = calls.derive_beats(client, campaign=CAMPAIGN, locations=LOCS)
+    assert [b.title for b in beats] == ["Gorge", "Camp", "Defeat the Witch"]
+    assert [b.position for b in beats] == [1, 2, 3]
+
+
+def test_a_correct_order_is_left_alone():
+    beats = [StoryBeat(1, "Start", "Go in."), StoryBeat(2, "Win", "Defeat the witch.")]
+    assert calls.move_victory_beat_last(beats, "Defeat the witch.") == beats
+    assert calls.move_victory_beat_last(beats, "") == beats
+    unrelated = [StoryBeat(1, "A", "Do a."), StoryBeat(2, "B", "Do b.")]
+    assert calls.move_victory_beat_last(unrelated, "Defeat the witch.") == unrelated
