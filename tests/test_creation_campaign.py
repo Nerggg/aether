@@ -378,24 +378,6 @@ def test_the_notes_reach_the_options_prompt(tmp_path):
     assert "Player's ideas: something spooky" in prompt
 
 
-def test_typing_your_own_answers(tmp_path):
-    own = "A drowned kingdom of salt and bells where the tide never goes out"
-    creator, _ = make_creator(tmp_path, [OPTS_A, OPTS_THREAT, OPTS_HOOK, *BUILD],
-                              ["", own, "4", "The salt king returns from the sea", "1", "1"])
-    assert creator.run() is not None
-    with GameDB.open("the_drowned_bell", tmp_path) as db:
-        info = db.get_campaign()
-        assert info.setting_description == own
-        assert info.primary_threat == "The salt king returns from the sea"
-
-
-def test_fragments_are_re_asked_and_cancel_leaves(tmp_path):
-    creator, out = make_creator(tmp_path, [OPTS_A, js(intent="unclear")], ["", "dark", "cancel"])
-    assert creator.run() is None
-    assert any("Pick a number" in line for line in out)
-    assert creator.values == {} and GameDB.list_campaigns(tmp_path) == []
-
-
 def test_asking_for_different_ideas_regenerates_the_menu(tmp_path):
     creator, _ = make_creator(tmp_path, [OPTS_A, js(intent="reject"), OPTS_B], ["", "show me different ones", "1", "cancel"])
     assert creator.run() is None
@@ -423,3 +405,51 @@ def test_two_campaigns_with_the_same_name_get_different_slots(tmp_path):
         creator, _ = make_creator(tmp_path, ["garbage"], ["", "1", "1", "1", "1"])
         creator.run()
     assert sorted(GameDB.list_campaigns(tmp_path)) == ["an_unknown_journey", "an_unknown_journey_2"]
+
+
+def test_old_ideas_are_cut_before_new_ones():
+    notes = "old idea; " + "filler " * 100 + "newest idea"
+    content = field_options_messages("primary_threat", {}, notes, 3)[1]["content"]
+    assert "newest idea" in content and "old idea" not in content
+    assert "around the player's ideas" in field_options_messages("primary_threat", {}, "", 3)[0]["content"]
+
+
+def test_typed_text_is_an_idea_that_regenerates_the_options(tmp_path):
+    creator, _ = make_creator(
+        tmp_path, [OPTS_A, js(intent="own_text"), OPTS_B, OPTS_THREAT],
+        ["something spooky", "something with an eagle", "2", "cancel"],
+    )
+    assert creator.run() is None
+    assert creator.ideas == ["something spooky", "something with an eagle"]
+    assert creator.values == {"setting_description": "A haunted pine forest of whispering trees"}
+    regenerated = creator.client._backend.calls[2]["messages"][1]["content"]
+    assert "Player's ideas: something spooky; something with an eagle" in regenerated
+
+
+def test_the_type_my_own_idea_slot_asks_for_an_idea_without_the_classifier(tmp_path):
+    creator, _ = make_creator(
+        tmp_path, [OPTS_A, OPTS_B, OPTS_THREAT], ["", "4", "a sky eagle", "1", "cancel"],
+    )
+    assert creator.run() is None
+    assert len(creator.client._backend.calls) == 3          # 2 setting menus + the threat menu, no classifier
+    assert creator.ideas == ["a sky eagle"]
+    assert creator.values == {"setting_description": "A sunken coastal city of salt and ruin"}
+
+
+def test_okay_and_hmm_show_the_menu_again_and_are_not_ideas(tmp_path):
+    creator, out = make_creator(
+        tmp_path, [OPTS_A, js(intent="accept"), js(intent="unclear")], ["", "okay", "hmm", "1", "cancel"],
+    )
+    assert creator.run() is None
+    assert sum("Choose the setting:" in line for line in out) == 3
+    assert creator.ideas == []
+    assert creator.values["setting_description"] == "A fog-choked marsh kingdom of drowned bells"
+
+
+def test_nothing_typed_ever_becomes_a_field_value(tmp_path):
+    long_text = "a drowned kingdom of salt and bells where the tide never goes out and the dead sing"
+    creator, _ = make_creator(
+        tmp_path, [OPTS_A, js(intent="own_text"), OPTS_B], ["", long_text, "cancel"],
+    )
+    assert creator.run() is None
+    assert creator.values == {} and creator.ideas == [long_text]

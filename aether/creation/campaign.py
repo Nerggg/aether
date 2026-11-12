@@ -2,10 +2,12 @@
 
 Code owns the three fields (setting, threat, quest hook) and asks them in
 order, so it always knows which question the player is answering. For each
-field one structured call writes three options that fit the earlier answers,
-and code renders them as a numbered menu. A reply is read by
-`character.interpret_reply`: a number first, long typed text next, and the
-small intent classifier only for what is left ("another", "you pick", "okay").
+field one structured call writes three options that fit the earlier answers
+and the player's ideas, and code renders them as a numbered menu. Only a
+number fills a field. Anything else the player types is an idea: it is added
+to the notes and the options are written again. A reply is read by
+`character.interpret_reply`: a number first, then the small intent classifier
+for "another" and "you pick".
 
 Everything the model returns is cleaned in code (`generate_field_options`,
 `build_world`, `normalize_*`), because a 3B model often gives bad ids, broken
@@ -57,6 +59,9 @@ MIN_FIELD_WORDS = 3   # "dark" or "decaying ruins" is a fragment, not a setting
 OPTION_COUNT = 3
 OPTION_MAX_CHARS = 220
 FIELD_TEXT_MAX_CHARS = 300
+
+IDEAS_MAX_CHARS = 400     # how much of the player's ideas the options prompt sees
+IDEA_MAX_CHARS = 200      # one idea
 
 FIELD_OPTIONS_MAX_TOKENS = 350
 METADATA_MAX_TOKENS = 300
@@ -166,6 +171,7 @@ def field_options_messages(key: str, answers: Dict[str, str], notes: str, count:
             "- Each option is one sentence of 8 to 25 words.",
             "- The options must be clearly different from each other.",
             "- Every option must fit the answers already chosen and the player's ideas, if any.",
+            "- Build the options around the player's ideas when they give any.",
             "- Do not use character names.",
             "",
             "Reply as JSON in this shape (replace the <placeholders>):",
@@ -174,7 +180,7 @@ def field_options_messages(key: str, answers: Dict[str, str], notes: str, count:
     )
     lines = []
     if notes.strip():
-        lines.append(f"Player's ideas: {_clip(notes, 300)}")
+        lines.append(f"Player's ideas: {_clip_tail(notes, IDEAS_MAX_CHARS)}")
     for k in CHECKLIST_KEYS:
         if answers.get(k):
             lines.append(f"{CHECKLIST_LABELS[k]} (already chosen): {answers[k]}")
@@ -251,6 +257,14 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rsplit(" ", 1)[0].rstrip(",;:-. ") + "..."
+
+
+def _clip_tail(text: str, limit: int) -> str:
+    """Keep the END of `text` (the newest ideas) when it is longer than `limit`."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:].split(" ", 1)[-1]
 
 
 def pending(values: Dict[str, str]) -> List[str]:
@@ -510,7 +524,16 @@ class CampaignCreator:
         self.print = print_fn
         self.rng = rng or random.Random()
         self.values: Dict[str, str] = {}
-        self.notes = ""
+        self.ideas: List[str] = []
+
+    @property
+    def notes(self) -> str:
+        return "; ".join(self.ideas)
+
+    def _add_idea(self, text: str) -> None:
+        idea = _clip(text, IDEA_MAX_CHARS)
+        if idea:
+            self.ideas.append(idea)
 
     def run(self) -> Optional[str]:
         """Run creation. Returns the new campaign's slug, or None if cancelled or failed."""
@@ -529,7 +552,7 @@ class CampaignCreator:
         self.print("          AETHER: CAMPAIGN CREATION TERMINAL")
         self.print("=======================================================")
         self.print("You will choose a setting, a threat and a quest hook. Answer with a number,")
-        self.print("or type what you want. Type 'cancel' at any time to leave.\n")
+        self.print("or type an idea and I will write new options. Type 'cancel' at any time to leave.\n")
 
     # --- input helpers ---
 
@@ -557,10 +580,11 @@ class CampaignCreator:
     # --- the form ---
 
     def _collect(self) -> None:
-        self.notes = self._read(
+        first = self._read(
             "Any ideas for your campaign? (optional, e.g. 'a dark swamp'; press Enter to skip): ",
             allow_empty=True,
         )
+        self._add_idea(first)
         for key in CHECKLIST_KEYS:
             value = self._ask_field(key)
             self.values[key] = value
@@ -574,25 +598,24 @@ class CampaignCreator:
         label = CHECKLIST_LABELS[key].lower()
         options = self._field_options(key)
         while True:
-            self._show(f"Choose the {label}:", options, custom="Type my own")
-            self.print("(or type your own, or ask for different ideas, or ask me to pick one)")
-            rep = self._ask(f"Choose the campaign's {label}", options, custom=True, open_text=True)
-            text = ""
+            self._show(f"Choose the {label}:", options, custom="Type my own idea")
+            self.print("(or type an idea to get new options, or ask me to pick one)")
+            rep = self._ask(f"Choose the campaign's {label}", options, custom=True)
             if rep.kind == "option":
-                text = options[rep.index]
-            elif rep.kind == "custom":
-                text = valid_field_text(self._read(f"Your {label}: "))
-            elif rep.kind == "text":
-                text = valid_field_text(rep.text)
-            elif rep.kind == "surprise":
-                text = self.rng.choice(options)
+                return options[rep.index]
+            if rep.kind == "surprise":
                 self.print("[System] Picked one for you.")
+                return self.rng.choice(options)
+            if rep.kind == "custom":
+                self._add_idea(self._read("Your idea: "))
+                options = self._field_options(key)
+            elif rep.kind == "text":
+                self._add_idea(rep.text)
+                options = self._field_options(key)
             elif rep.kind == "reject":
                 options = self._field_options(key)
-                continue
-            if text:
-                return text
-            self.print(f"[System] Pick a number, or write at least {MIN_FIELD_WORDS} words of your own.")
+            else:       # accept or unclear: nothing to act on, show the menu again
+                self.print(f"[System] Pick a number from 1 to {len(options)}, or type an idea for new options.")
 
     # --- build and save ---
 
