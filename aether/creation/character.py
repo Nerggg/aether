@@ -1,33 +1,34 @@
-"""Character creation.
+"""Character creation as a form that code drives.
 
-Flow (the same for the player as before):
+Code owns the four fields (name, race, class, backstory) and renders every menu
+itself, so it always knows which question the player is answering. The model
+only does two small, closed jobs:
 
-    guide chat (name, race, class, backstory) -> checklist complete -> save
+* write a few backstory options (with built-in fallbacks if it fails)
+* classify a reply that code could not read (choose / accept / reject /
+  surprise_me / own_text / unclear), validated in code
 
-The model only chats and extracts. Everything that matters is decided in code:
-
-* race and class must map onto the real lists (`stats.RACES`, `stats.CLASSES`)
-* every extracted value must appear in the conversation, so a model that
-  guesses cannot fill the checklist
-* backstory is accepted only once name, race and class are settled
-* stats and HP come from `calculate_character_stats`, the starting kit from a table
-* the player and the kit are saved in one transaction
+A reply is read in this order, stopping at the first match:
+a menu number, a closed-list match (race and class), long typed text for open
+fields, and only then the classifier.
 
 Run it on its own:  python -m aether.creation.character <campaign_slug>
 """
 
 from __future__ import annotations
 
+import difflib
+import random
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field
 
+from aether.creation.names import pick_patron_name
 from aether.db import GameDB, SchemaVersionError
-from aether.creation.menus import CUSTOM_CHOICE, last_assistant_reply, resolve_choice
-from aether.llm import calls
 from aether.llm.client import LLMClient, LLMError, Messages
 from aether.logic.stats import (
     CLASSES,
@@ -39,15 +40,19 @@ from aether.logic.stats import (
 )
 from aether.models import CampaignInfo, Character
 
-CORE_KEYS = ("name", "race", "char_class")
-CHECKLIST_KEYS = CORE_KEYS + ("backstory",)
+CHECKLIST_KEYS = ("name", "race", "char_class", "backstory")
 CHECKLIST_LABELS = {"name": "Name", "race": "Race", "char_class": "Class", "backstory": "Backstory"}
 
 MAX_NAME_CHARS = 40
 MAX_NAME_WORDS = 4
 MIN_BACKSTORY_WORDS = 6
 BACKSTORY_MAX_CHARS = 600
-CHECKLIST_MAX_TOKENS = 300
+OPTION_MAX_CHARS = 300
+OWN_TEXT_WORDS = 10          # a reply this long for an open field is the player's own text
+NAME_COUNT = 3
+BACKSTORY_COUNT = 3
+BACKSTORY_MAX_TOKENS = 400
+INTENT_MAX_TOKENS = 60
 
 RACE_ALIASES = {
     "elves": "Elf", "elven": "Elf", "dwarves": "Dwarf", "dwarven": "Dwarf", "gnomish": "Gnome",
@@ -70,42 +75,39 @@ _BAD_NAMES = frozenset({"none", "null", "unknown", "n/a", "na", "player", "chara
 _RESERVED = frozenset(
     {r.lower() for r in RACES} | {c.lower() for c in CLASSES} | set(RACE_ALIASES)
 )
-
-FOCUS_INSTRUCTIONS = {
-    "name": "Offer three character name suggestions that fit the setting.",
-    "race": "Offer three races from the approved list.",
-    "char_class": "Offer three classes from the approved list.",
-    "backstory": (
-        "Offer three short backstory options, one or two sentences each (under 30 words), tied to the "
-        "campaign and to the chosen race and class. Do NOT write a full backstory and do NOT summarise the character."
-    ),
-}
+_NAME_STOP = frozenset({"and", "who", "from", "with", "a", "an", "the", "that", "which", "but", "or"})
+_NAME_PHRASE = re.compile(
+    r"\b(?:named|called|name is|name's|names)\s+([A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*){0,3})",
+    re.IGNORECASE,
+)
+_NUMBER = re.compile(r"^\s*\(?(\d+)\)?[.)]?\s*$")
 
 
-# --- schema ------------------------------------------------------------------------------------
+# --- schemas -----------------------------------------------------------------------------------
 
-def _joined(value):
-    """Small models sometimes return a list where a string is expected."""
-    if isinstance(value, list):
-        return " ".join(str(v).strip() for v in value if str(v).strip())
-    return value
+class IntentReply(BaseModel):
+    intent: Literal["choose", "accept", "reject", "surprise_me", "own_text", "unclear"] = "unclear"
+    index: Optional[int] = None
 
 
-class CharacterChecklist(BaseModel):
-    """Plain text on purpose: race and class are mapped to the real lists in code,
-    so "Orc" costs nothing instead of invalidating the whole reply."""
-    name: Optional[str] = None
-    race: Optional[str] = None
-    character_class: Optional[str] = None
-    backstory: Optional[str] = None
-
-    @field_validator("*", mode="before")
-    @classmethod
-    def _text(cls, value):
-        return _joined(value)
+class BackstoryOptions(BaseModel):
+    options: List[str] = Field(default_factory=list)
 
 
-# --- prompts -----------------------------------------------------------------------------------
+@dataclass
+class Reply:
+    """What a player's reply means. `kind` is one of: option, custom, text, accept,
+    reject, surprise, unclear."""
+    kind: str
+    index: int = -1
+    text: str = ""
+
+
+class _Cancelled(Exception):
+    pass
+
+
+# --- small pure helpers --------------------------------------------------------------------------
 
 def _clip(text: str, limit: int) -> str:
     text = " ".join((text or "").split())
@@ -114,21 +116,100 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit].rsplit(" ", 1)[0].rstrip(",;:-. ") + "..."
 
 
-def rules_text() -> str:
-    """The approved races and classes, built from the real tables so it can't drift."""
-    lines = ["APPROVED RACES:"]
-    for race in RACES:
-        bonuses = RACIAL_BONUSES[race]
-        if len(bonuses) == 6:
-            text = "+1 to all abilities"
-        else:
-            text = ", ".join(f"+{b} {a.title()}" for a, b in bonuses.items())
-        lines.append(f"- {race}: {text}")
-    lines += ["", "APPROVED CLASSES:"]
-    for cls in CLASSES:
-        lines.append(f"- {cls}: hit die d{HIT_DIE[cls]}, key ability {STAT_PRIORITIES[cls][0].title()}")
-    return "\n".join(lines)
+def parse_number(text: str, count: int) -> Optional[int]:
+    """'2', '2.' or '(2)' as a zero-based index into `count` menu lines, else None."""
+    m = _NUMBER.match(text or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n - 1 if 1 <= n <= count else None
 
+
+def match_closed(text: str, options: Sequence[str], aliases: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The one option a free-text reply names ('i'd go with paladin', 'elven', 'palladin').
+
+    Exact words and aliases match first; longer words may be one typo away.
+    Returns None when nothing matches or when two different options are named.
+    """
+    lowered = {o.lower(): o for o in options}
+    fuzzy_pool = [o for o in lowered if len(o) >= 5]
+    found = set()
+    for word in re.findall(r"[a-z']+", (text or "").lower()):
+        if word in lowered:
+            found.add(lowered[word])
+        elif aliases and aliases.get(word) in options:
+            found.add(aliases[word])
+        elif len(word) >= 5:
+            close = difflib.get_close_matches(word, fuzzy_pool, n=1, cutoff=0.84)
+            if close and close[0][0] == word[0]:
+                found.add(lowered[close[0]])
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def clean_name(text: Optional[str]) -> str:
+    """A plausible character name, or '' (placeholders, race/class words and sentences are rejected)."""
+    name = " ".join(str(text or "").split()).strip(" \"'`.,")
+    if not name or len(name) > MAX_NAME_CHARS or len(name.split()) > MAX_NAME_WORDS:
+        return ""
+    if not re.search(r"[A-Za-z]", name) or name.lower() in _BAD_NAMES or name.lower() in _RESERVED:
+        return ""
+    return name
+
+
+def _tidy_name(name: str) -> str:
+    return name.title() if name.islower() else name
+
+
+def name_from_phrase(text: str) -> str:
+    """'i want a human named baron and a ranger' -> 'Baron'. '' if there is no 'named X' phrase."""
+    m = _NAME_PHRASE.search(text or "")
+    if not m:
+        return ""
+    words: List[str] = []
+    for w in m.group(1).split():
+        if w.lower() in _NAME_STOP:
+            break
+        words.append(w)
+    return _tidy_name(clean_name(" ".join(words)))
+
+
+def extract_name(text: str) -> str:
+    """A name from a 'named X' phrase, or the whole text if it is itself a valid name."""
+    return name_from_phrase(text) or _tidy_name(clean_name(text))
+
+
+def valid_backstory(text: str) -> str:
+    text = _clip(text, BACKSTORY_MAX_CHARS)
+    return text if len(text.split()) >= MIN_BACKSTORY_WORDS else ""
+
+
+def race_line(race: str) -> str:
+    bonuses = RACIAL_BONUSES[race]
+    if len(bonuses) == 6:
+        return f"{race}: +1 to all abilities"
+    return f"{race}: " + ", ".join(f"+{b} {a.title()}" for a, b in bonuses.items())
+
+
+def class_line(char_class: str) -> str:
+    return f"{char_class}: hit die d{HIT_DIE[char_class]}, key ability {STAT_PRIORITIES[char_class][0].title()}"
+
+
+def starting_items(char_class: str) -> List[Tuple[str, int]]:
+    return [*STARTING_KITS.get(char_class, ()), *COMMON_ITEMS]
+
+
+def pending(values: Dict[str, str]) -> List[str]:
+    return [k for k in CHECKLIST_KEYS if not values.get(k)]
+
+
+def suggest_names(rng: random.Random, count: int = NAME_COUNT) -> List[str]:
+    names: List[str] = []
+    while len(names) < count:
+        names.append(pick_patron_name(rng, exclude=names))
+    return names
+
+
+# --- prompts and the two model jobs ----------------------------------------------------------------
 
 def campaign_context(info: CampaignInfo) -> str:
     lines = [
@@ -142,167 +223,130 @@ def campaign_context(info: CampaignInfo) -> str:
     return "\n".join(lines)
 
 
-def guide_messages(info: CampaignInfo, checklist: Dict[str, str], history: Sequence[Dict[str, str]]) -> Messages:
-    def status(key: str) -> str:
-        value = checklist.get(key)
-        if not value:
-            return "PENDING"
-        return "COMPLETED" if key == "backstory" else f"COMPLETED ({value})"
-
-    missing = pending(checklist)
-    focus = missing[0] if missing else None
-    focus_lines = []
-    if focus:
-        focus_lines = [
-            f"- Ask ONLY about the player's {CHECKLIST_LABELS[focus].lower()}. "
-            "Anything marked COMPLETED is final: never ask about it again.",
-            f"- {FOCUS_INSTRUCTIONS[focus]}",
-        ]
-
+def intent_messages(question: str, options: Sequence[str], reply: str) -> Messages:
     system = "\n".join(
         [
-            "You are the Character Creation Guide. Help the player build a character for this campaign.",
+            "A player answered a menu on a character-creation screen. Decide what they mean.",
+            "intent is one of:",
+            "- choose: picks one of the numbered options (set index to its number)",
+            "- accept: agrees with or approves what was shown (yes, ok, okay, sure, sounds good)",
+            "- reject: does not want what was shown and asks for something else",
+            "- surprise_me: asks you to pick or invent something for them (random, you choose)",
+            "- own_text: gives their own answer instead of the options",
+            "- unclear: none of the above",
             "",
-            rules_text(),
-            "",
-            "CAMPAIGN",
-            campaign_context(info),
-            "",
-            "Current checklist:",
-            *(f"- {CHECKLIST_LABELS[k].lower()}: {status(k)}" for k in CHECKLIST_KEYS),
-            "",
-            "INSTRUCTIONS",
-            *focus_lines,
-            "- Only offer races and classes from the approved lists.",
-            "- Do not repeat or summarise what the player already chose.",
-            "- Always present your question as a multiple-choice list in exactly this format:",
-            "  A) [Suggestion 1]",
-            "  B) [Suggestion 2]",
-            "  C) [Suggestion 3]",
-            "  D) Something else / Player's custom input",
-            "- Keep the introduction under 50 words, collaborative and immersive.",
+            'Reply as JSON in this shape: {"intent":"<intent>","index":null}',
         ]
     )
-    return [{"role": "system", "content": system}, *history]
+    shown = "\n".join(f"{i}. {o}" for i, o in enumerate(options, start=1)) or "(none)"
+    user = f"QUESTION: {question}\nOPTIONS:\n{shown}\nPLAYER REPLY: {reply}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def checklist_messages(history: Sequence[Dict[str, str]]) -> Messages:
-    system = (
-        "You are a strict data extraction system. Read the recent conversation and extract the character "
-        "details into the JSON schema. Only extract values the player has explicitly chosen or agreed on. "
-        f"race is one of: {', '.join(RACES)}. character_class is one of: {', '.join(CLASSES)}. "
-        "Use null for anything not decided. Do not invent details."
+def classify_reply(client: LLMClient, question: str, options: Sequence[str], reply: str) -> Tuple[str, Optional[int]]:
+    """(intent, zero-based index or None). A bad or invalid model answer becomes 'unclear'."""
+    parsed = client.structured(
+        "referee", intent_messages(question, options, reply), IntentReply,
+        max_tokens=INTENT_MAX_TOKENS, temperature=0.0,
     )
-    return [{"role": "system", "content": system}, *history[-4:]]
-
-
-# --- pure helpers ------------------------------------------------------------------------------
-
-def _words(text: str) -> set:
-    return set(re.findall(r"[a-z]+", (text or "").lower()))
-
-
-def find_choice(text: Optional[str], options: Sequence[str], aliases: Optional[Dict[str, str]] = None) -> Optional[str]:
-    """The first option named in `text` ('Elven' -> 'Elf'), or None."""
-    aliases = aliases or {}
-    lowered = {o.lower(): o for o in options}
-    for word in re.findall(r"[a-z]+", (text or "").lower()):
-        if word in lowered:
-            return lowered[word]
-        if aliases.get(word) in options:
-            return aliases[word]
-    return None
-
-
-def _mentioned(canonical: str, words: set, aliases: Optional[Dict[str, str]] = None) -> bool:
-    if canonical.lower() in words:
-        return True
-    return any(w in words and c == canonical for w, c in (aliases or {}).items())
-
-
-def clean_name(text: Optional[str]) -> str:
-    """A plausible character name, or '' (placeholders, race/class words and sentences are rejected)."""
-    name = " ".join(str(text or "").split()).strip(" \"'`.,")
-    if not name or len(name) > MAX_NAME_CHARS or len(name.split()) > MAX_NAME_WORDS:
-        return ""
-    if not re.search(r"[A-Za-z]", name) or name.lower() in _BAD_NAMES or name.lower() in _RESERVED:
-        return ""
-    return name
-
-
-def pending(checklist: Dict[str, str]) -> List[str]:
-    return [k for k in CHECKLIST_KEYS if not checklist.get(k)]
-
-
-def status_line(checklist: Dict[str, str]) -> str:
-    parts = [f"{CHECKLIST_LABELS[k]}: {'OK' if checklist.get(k) else 'PENDING'}" for k in CHECKLIST_KEYS]
-    return "[Checklist] " + " | ".join(parts)
-
-
-def merge_checklist(current: Dict[str, str], parsed: Optional[CharacterChecklist], source: str) -> Dict[str, str]:
-    """Add newly decided values; never replace one that is already settled.
-
-    Every value must be valid (a real name, a race and class from the lists, a
-    backstory of MIN_BACKSTORY_WORDS or more) and must appear in `source`, the
-    conversation text. The backstory is accepted only once name, race and class
-    are all settled, which matches the order the guide asks in.
-    """
-    merged = dict(current)
     if parsed is None:
-        return merged
-    words = _words(source)
-    lowered = source.lower()
-
-    if "name" not in merged:
-        name = clean_name(parsed.name)
-        if name and name.lower() in lowered:
-            merged["name"] = name
-    if "race" not in merged:
-        race = find_choice(parsed.race, RACES, RACE_ALIASES)
-        if race and _mentioned(race, words, RACE_ALIASES):
-            merged["race"] = race
-    if "char_class" not in merged:
-        char_class = find_choice(parsed.character_class, CLASSES)
-        if char_class and _mentioned(char_class, words):
-            merged["char_class"] = char_class
-
-    if "backstory" not in merged and all(k in merged for k in CORE_KEYS):
-        text = _clip(parsed.backstory or "", BACKSTORY_MAX_CHARS)
-        if len(text.split()) >= MIN_BACKSTORY_WORDS and calls.is_grounded(text, source):
-            merged["backstory"] = text
-    return merged
+        return "unclear", None
+    if parsed.intent == "choose":
+        if parsed.index is not None and 1 <= parsed.index <= len(options):
+            return "choose", parsed.index - 1
+        return "unclear", None
+    return parsed.intent, None
 
 
-def apply_choice(current: Dict[str, str], option: str) -> Dict[str, str]:
-    """Fill the next pending item straight from a chosen option, with no LLM call.
+def interpret_reply(
+    reply: str,
+    options: Sequence[str],
+    *,
+    classify: Callable[[str], Tuple[str, Optional[int]]],
+    custom: bool = False,
+    closed: bool = False,
+    aliases: Optional[Dict[str, str]] = None,
+    open_text: bool = False,
+    shortcut: Optional[Callable[[str], Optional[Reply]]] = None,
+) -> Reply:
+    """Read a reply to a menu. Code first (numbers, closed lists, long text), the classifier last."""
+    n = len(options)
+    idx = parse_number(reply, n + (1 if custom else 0))
+    if idx is not None:
+        return Reply("option", idx) if idx < n else Reply("custom")
+    if shortcut is not None:
+        hit = shortcut(reply)
+        if hit is not None:
+            return hit
+    if closed:
+        match = match_closed(reply, options, aliases)
+        if match:
+            return Reply("option", list(options).index(match))
+    if open_text and len(reply.split()) >= OWN_TEXT_WORDS:
+        return Reply("text", text=reply)
 
-    Race and class must name a real one (looked at before the colon). A backstory
-    option needs MIN_BACKSTORY_WORDS. Names are left to the extractor.
-    """
-    merged = dict(current)
-    missing = pending(merged)
-    if not missing:
-        return merged
-    key = missing[0]
-    head = option.split(":", 1)[0]
-    if key == "race":
-        race = find_choice(head, RACES, RACE_ALIASES)
-        if race:
-            merged["race"] = race
-    elif key == "char_class":
-        char_class = find_choice(head, CLASSES)
-        if char_class:
-            merged["char_class"] = char_class
-    elif key == "backstory":
-        text = _clip(option, BACKSTORY_MAX_CHARS)
-        if len(text.split()) >= MIN_BACKSTORY_WORDS:
-            merged["backstory"] = text
-    return merged
+    kind, index = classify(reply)
+    if kind == "choose" and index is not None:
+        return Reply("option", index)
+    if kind == "own_text":
+        return Reply("text", text=reply)
+    if kind == "surprise_me":
+        return Reply("surprise")
+    if kind in ("accept", "reject"):
+        return Reply(kind)
+    return Reply("unclear")
 
 
-def starting_items(char_class: str) -> List[Tuple[str, int]]:
-    return [*STARTING_KITS.get(char_class, ()), *COMMON_ITEMS]
+def backstory_messages(
+    info: CampaignInfo, name: str, race: str, char_class: str, notes: str, count: int
+) -> Messages:
+    system = "\n".join(
+        [
+            "You write short character backstories for a fantasy role-playing game.",
+            f"Write exactly {count} different options. Each is one or two sentences, under 35 words, "
+            "in third person, uses the character's name and ties into the campaign.",
+            "Do not mention game rules or numbers.",
+            "",
+            "Reply as JSON in this shape (replace the <placeholders>):",
+            '{"options":["<backstory 1>","<backstory 2>"]}',
+        ]
+    )
+    lines = [campaign_context(info), f"Character: {name}, a {race} {char_class}"]
+    if notes.strip():
+        lines.append(f"Player's ideas: {_clip(notes, 300)}")
+    return [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(lines)}]
 
+
+def fallback_backstories(name: str, race: str, char_class: str) -> List[str]:
+    return [
+        f"{name} the {race} {char_class} lost someone dear to the trouble now spreading across the land and seeks answers.",
+        f"{name} left a quiet life behind after hearing rumours of danger, and now answers the call to adventure.",
+        f"{name} is a wandering {race} {char_class} with a debt to repay and little reason to trust strangers.",
+    ]
+
+
+def generate_backstories(
+    client: LLMClient, info: CampaignInfo, name: str, race: str, char_class: str, notes: str, count: int
+) -> List[str]:
+    """`count` distinct backstory options. Model output is cleaned, and built-in ones fill any gap."""
+    response = client.structured(
+        "creation", backstory_messages(info, name, race, char_class, notes, count),
+        BackstoryOptions, max_tokens=BACKSTORY_MAX_TOKENS,
+    )
+    result: List[str] = []
+    for raw in (response.options if response else []):
+        text = _clip(str(raw), OPTION_MAX_CHARS)
+        if len(text.split()) >= MIN_BACKSTORY_WORDS and text.lower() not in {r.lower() for r in result}:
+            result.append(text)
+    for fallback in fallback_backstories(name, race, char_class):
+        if len(result) >= count:
+            break
+        if fallback.lower() not in {r.lower() for r in result}:
+            result.append(fallback)
+    return result[:count]
+
+
+# --- saving --------------------------------------------------------------------------------------------
 
 def save_character(
     slug: str,
@@ -351,14 +395,16 @@ class CharacterCreator:
         campaigns_dir: Optional[Path] = None,
         input_fn: Callable[[str], str] = input,
         print_fn: Callable[..., None] = print,
+        rng: Optional[random.Random] = None,
     ):
         self.client = client
         self.slug = slug
         self.campaigns_dir = campaigns_dir
         self.input = input_fn
         self.print = print_fn
-        self.history: List[Dict[str, str]] = []
-        self.checklist: Dict[str, str] = {}
+        self.rng = rng or random.Random()
+        self.values: Dict[str, str] = {}
+        self.notes = ""
         self.info: Optional[CampaignInfo] = None
 
     def run(self) -> Optional[int]:
@@ -367,11 +413,9 @@ class CharacterCreator:
             return None
         self._intro()
         try:
-            if not self._converse():
-                self.print("\nCharacter creation cancelled.")
-                return None
+            self._collect()
             return self._finalize()
-        except (KeyboardInterrupt, EOFError):
+        except (_Cancelled, KeyboardInterrupt, EOFError):
             self.print("\nCharacter creation cancelled.")
         except LLMError as e:
             self.print(f"\n[LLM error] {e}")
@@ -396,77 +440,153 @@ class CharacterCreator:
         return True
 
     def _intro(self) -> None:
-        self.print(rules_text())
         self.print("\n=======================================================")
         self.print("          AETHER: CHARACTER CREATION TERMINAL")
         self.print("=======================================================")
         self.print(f"Campaign: {self.info.name}")
-        self.print("Tell me about your character: name, race, class and where they come from.")
-        self.print("Once everything is settled the character is saved automatically.")
-        self.print("Type 'complete' to finish early (when nothing is pending) or 'cancel' to leave.\n")
+        self.print("You will choose a name, race, class and backstory. Answer with a number,")
+        self.print("or type what you want. Type 'cancel' at any time to leave.\n")
 
-    def _converse(self) -> bool:
+    # --- input helpers ---
+
+    def _read(self, prompt: str = "\nYou: ", allow_empty: bool = False) -> str:
         while True:
-            text = self.input("\nYou: ").strip()
-            if not text:
-                continue
-            command = text.lower()
-            if command == "cancel":
-                return False
-            if command == "complete":
-                missing = pending(self.checklist)
-                if not missing:
-                    return True
-                labels = ", ".join(CHECKLIST_LABELS[k] for k in missing)
-                self.print(f"[System] Still pending: {labels}. Keep chatting to settle them.")
-                continue
+            text = self.input(prompt).strip()
+            if text.lower() == "cancel":
+                raise _Cancelled()
+            if text or allow_empty:
+                return text
 
-            choice = resolve_choice(text, last_assistant_reply(self.history))
-            if choice == CUSTOM_CHOICE:
-                self.print("[System] Go ahead and type your own answer.")
-                continue
+    def _show(self, title: str, lines: Sequence[str], custom: Optional[str] = None) -> None:
+        self.print(f"\n{title}")
+        for i, line in enumerate(lines, start=1):
+            self.print(f"  {i}. {line}")
+        if custom:
+            self.print(f"  {len(lines) + 1}. {custom}")
 
-            if choice is not None:
-                self.history.append({"role": "user", "content": f"I choose: {choice}"})
-                before = dict(self.checklist)
-                self.checklist = apply_choice(self.checklist, choice)
-                if self.checklist == before:          # e.g. a name option: let the extractor read it
-                    self._update_checklist()
-            else:
-                self.history.append({"role": "user", "content": text})
-                self._update_checklist()
-            self.print(status_line(self.checklist))
-            if not pending(self.checklist):
-                self.print("\n[System] All core traits are settled.")
-                return True
-            self._guide_reply()
-
-    def _update_checklist(self) -> None:
-        parsed = self.client.structured(
-            "referee",
-            checklist_messages(self.history),
-            CharacterChecklist,
-            max_tokens=CHECKLIST_MAX_TOKENS,
-            temperature=0.0,
+    def _ask(self, question: str, options: Sequence[str], **kw) -> Reply:
+        reply = self._read()
+        return interpret_reply(
+            reply, options, classify=lambda r: classify_reply(self.client, question, options, r), **kw
         )
-        source = " ".join(m["content"] for m in self.history)
-        self.checklist = merge_checklist(self.checklist, parsed, source)
 
-    def _guide_reply(self) -> None:
-        self.print("\nGuide: ", end="", flush=True)
-        pieces: List[str] = []
-        for piece in self.client.stream("creation", guide_messages(self.info, self.checklist, self.history)):
-            self.print(piece, end="", flush=True)
-            pieces.append(piece)
-        self.print()
-        reply = "".join(pieces).strip()
-        if reply:
-            self.history.append({"role": "assistant", "content": reply})
-        else:
-            self.print("[System] The guide had nothing to say. Keep describing your character.")
+    def _done(self, key: str, value: str) -> None:
+        self.values[key] = value
+        self.print(f"[OK] {CHECKLIST_LABELS[key]}: {value}")
+
+    # --- the form ---
+
+    def _collect(self) -> None:
+        self.notes = self._read("Any ideas for your character? (optional, press Enter to skip): ", allow_empty=True)
+        if self.notes:
+            self._prefill(self.notes)
+        if "name" not in self.values:
+            self._done("name", self._ask_name())
+        if "race" not in self.values:
+            self._done("race", self._ask_closed("race", list(RACES), [race_line(r) for r in RACES], RACE_ALIASES))
+        if "char_class" not in self.values:
+            self._done("char_class", self._ask_closed("char_class", list(CLASSES), [class_line(c) for c in CLASSES]))
+        if "backstory" not in self.values:
+            self._done("backstory", self._ask_backstory())
+
+    def _prefill(self, notes: str) -> None:
+        """Use the notes only for things they name unambiguously."""
+        name = name_from_phrase(notes)
+        if name:
+            self._done("name", name)
+        race = match_closed(notes, RACES, RACE_ALIASES)
+        if race:
+            self._done("race", race)
+        char_class = match_closed(notes, CLASSES)
+        if char_class:
+            self._done("char_class", char_class)
+
+    def _ask_name(self) -> str:
+        options = suggest_names(self.rng)
+        while True:
+            self._show("Choose a name:", options, custom="Type my own name")
+            rep = self._ask(
+                "Choose a name for the character", options, custom=True,
+                shortcut=lambda r: Reply("text", text=r) if name_from_phrase(r) else None,
+            )
+            name = ""
+            if rep.kind == "option":
+                name = options[rep.index]
+            elif rep.kind == "custom":
+                name = extract_name(self._read("Name: "))
+            elif rep.kind == "text":
+                name = extract_name(rep.text)
+            elif rep.kind == "surprise":
+                name = options[0]
+            elif rep.kind == "reject":
+                options = suggest_names(self.rng)
+                continue
+            if name:
+                return name
+            self.print("[System] I did not catch a name. Pick a number, or choose 'Type my own name'.")
+
+    def _ask_closed(
+        self, key: str, options: List[str], lines: List[str], aliases: Optional[Dict[str, str]] = None
+    ) -> str:
+        label = CHECKLIST_LABELS.get(key, key).lower()
+        while True:
+            self._show(f"Choose your {label}:", lines)
+            rep = self._ask(f"Choose the character's {label}", options, closed=True, aliases=aliases)
+            if rep.kind == "option":
+                return options[rep.index]
+            if rep.kind == "surprise":
+                pick = self.rng.choice(options)
+                self.print(f"[System] Picked {pick} for you.")
+                return pick
+            self.print(f"[System] Pick a number from 1 to {len(options)}, or name a {label} from the list.")
+
+    def _backstory_options(self, count: int) -> List[str]:
+        v = self.values
+        self.print("\n[System] Writing backstory ideas...")
+        return generate_backstories(self.client, self.info, v["name"], v["race"], v["char_class"], self.notes, count)
+
+    def _ask_backstory(self) -> str:
+        options = self._backstory_options(BACKSTORY_COUNT)
+        while True:
+            self._show("Choose a backstory:", options, custom="Write my own")
+            self.print("(or type your own, or ask me to pick one for you)")
+            rep = self._ask("Choose a backstory for the character", options, custom=True, open_text=True)
+            text = ""
+            if rep.kind == "option":
+                text = options[rep.index]
+            elif rep.kind == "custom":
+                text = valid_backstory(self._read("Backstory: "))
+            elif rep.kind == "text":
+                text = valid_backstory(rep.text)
+            elif rep.kind == "surprise":
+                return self._confirm_backstory(self._backstory_options(1)[0])
+            elif rep.kind == "reject":
+                options = self._backstory_options(BACKSTORY_COUNT)
+                continue
+            if text:
+                return text
+            self.print(f"[System] Pick a number, or write at least {MIN_BACKSTORY_WORDS} words of your own.")
+
+    def _confirm_backstory(self, text: str) -> str:
+        options = ["Keep it", "Write another"]
+        while True:
+            self.print(f"\n{text}")
+            self._show("Keep this backstory?", options, custom="Type my own")
+            rep = self._ask("Keep this backstory?", options, custom=True)
+            if rep.kind == "accept" or (rep.kind == "option" and rep.index == 0):
+                return text
+            if rep.kind in ("reject", "surprise") or (rep.kind == "option" and rep.index == 1):
+                text = self._backstory_options(1)[0]
+            elif rep.kind == "custom":
+                own = valid_backstory(self._read("Backstory: "))
+                if own:
+                    return own
+                self.print(f"[System] Write at least {MIN_BACKSTORY_WORDS} words.")
+            else:
+                self.print("[System] Pick 1 to keep it, 2 for another, or 3 to type your own.")
 
     def _finalize(self) -> int:
-        c = self.checklist
+        c = self.values
         self.print("\nSaving your character...")
         pid = save_character(
             self.slug, name=c["name"], race=c["race"], char_class=c["char_class"],

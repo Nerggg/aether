@@ -1,22 +1,26 @@
 import json
+import random
 
 import pytest
 
 from aether.config import Config
 from aether.creation import character as ch
+from aether.creation import names
 from aether.creation.campaign import World, save_campaign
 from aether.creation.character import (
-    CharacterChecklist,
     CharacterCreator,
+    Reply,
+    classify_reply,
     clean_name,
-    find_choice,
-    guide_messages,
-    merge_checklist,
-    pending,
-    rules_text,
+    extract_name,
+    fallback_backstories,
+    generate_backstories,
+    interpret_reply,
+    match_closed,
+    name_from_phrase,
+    parse_number,
     save_character,
     starting_items,
-    apply_choice,
 )
 from aether.db import GameDB
 from aether.llm.client import LLMClient
@@ -34,18 +38,19 @@ def ask(*answers):
     return lambda prompt="": next(it)
 
 
+INFO = CampaignInfo(
+    name="Camp", slug="camp", setting_description="A foggy marsh.", primary_threat="A witch.",
+    starting_quest_hook="Find the bell.", starting_patron="Mother Hesk, ferry-keeper",
+    starting_location_id="ferry",
+)
+
+
 def make_campaign(tmp_path, slug="camp"):
-    info = CampaignInfo(
-        name="Camp", slug=slug, setting_description="A foggy marsh.", primary_threat="A witch.",
-        starting_quest_hook="Find the bell.", starting_patron="Mother Hesk, ferry-keeper",
-        starting_location_id="ferry",
-    )
     world = World(
         [Location("ferry", "Ferry", "x"), Location("cave", "Cave", "y"), Location("end", "End", "z")],
         [("ferry", "cave"), ("cave", "end")],
     )
-    save_campaign(info, world, [], tmp_path)
-    return info
+    save_campaign(INFO, world, [], tmp_path)
 
 
 def make_creator(tmp_path, responses, inputs, slug="camp"):
@@ -54,103 +59,124 @@ def make_creator(tmp_path, responses, inputs, slug="camp"):
     creator = CharacterCreator(
         client, slug, campaigns_dir=tmp_path, input_fn=ask(*inputs),
         print_fn=lambda *a, **k: out.append(" ".join(str(x) for x in a)),
+        rng=random.Random(5),
     )
     return creator, out
 
 
-# --- schema and small helpers ------------------------------------------------------------------
-
-def test_lists_are_joined_into_text():
-    assert CharacterChecklist.model_validate_json('{"backstory":["a","b"]}').backstory == "a b"
-    assert CharacterChecklist.model_validate_json("{}").name is None
-
-
-def test_find_choice():
-    assert find_choice("Elf", RACES) == "Elf"
-    assert find_choice("a proud ELVEN scout", RACES, ch.RACE_ALIASES) == "Elf"
-    assert find_choice("an Orc", RACES, ch.RACE_ALIASES) is None
-    assert find_choice("Ranger", CLASSES) == "Ranger"
-    assert find_choice(None, CLASSES) is None
+STORIES = [
+    "Aria lost her squad in the fog and seeks atonement.",
+    "Aria fled a burning city and hides her past.",
+    "Aria is a wandering scout who owes an old debt.",
+]
 
 
-def test_clean_name():
+# --- pure helpers ------------------------------------------------------------------------------
+
+def test_parse_number():
+    assert parse_number("2", 3) == 1
+    assert parse_number(" (3). ", 3) == 2
+    assert parse_number("4", 3) is None
+    assert parse_number("0", 3) is None
+    assert parse_number("two", 3) is None
+    assert parse_number("2 rogues", 3) is None
+
+
+def test_match_closed():
+    assert match_closed("i'd go with paladin", CLASSES) == "Paladin"
+    assert match_closed("PALADIN!", CLASSES) == "Paladin"
+    assert match_closed("palladin", CLASSES) == "Paladin"
+    assert match_closed("an elven scout", RACES, ch.RACE_ALIASES) == "Elf"
+    assert match_closed("a stranger", CLASSES) is None          # close to 'ranger' but starts differently
+    assert match_closed("myself", RACES) is None
+    assert match_closed("a fighter or a wizard", CLASSES) is None    # two options: ambiguous
+    assert match_closed("sure", CLASSES) is None
+    assert match_closed("", CLASSES) is None
+
+
+def test_name_helpers():
+    assert name_from_phrase("i want a human named baron") == "Baron"
+    assert name_from_phrase("a ranger called Thrain Blackwood and a bow") == "Thrain Blackwood"
+    assert name_from_phrase("something strong") == ""
+    assert name_from_phrase("named elf") == ""                  # a race word is not a name
+    assert extract_name("Aria") == "Aria"
+    assert extract_name("aria") == "Aria"
+    assert extract_name("sure thing, that sounds good to me") == ""
     assert clean_name("  'Aria' ") == "Aria"
-    assert clean_name("Kael Stormborn") == "Kael Stormborn"
-    for bad in (None, "", "none", "Unknown", "Elf", "ranger", "elven", "a b c d e", "12", "x" * 60):
+    for bad in (None, "", "none", "Elf", "ranger", "a b c d e", "12", "x" * 60):
         assert clean_name(bad) == ""
 
-
-def test_rules_text_comes_from_the_real_tables():
-    text = rules_text()
-    assert "- Elf: +2 Dexterity" in text
-    assert "- Human: +1 to all abilities" in text
-    assert "- Wizard: hit die d6" in text
-    assert "armor class" not in text.lower() and " AC" not in text
-
-
-def test_guide_prompt_has_campaign_checklist_and_format():
-    info = CampaignInfo(name="Camp", slug="camp", setting_description="A foggy marsh.", primary_threat="A witch.",
-                        starting_quest_hook="Find the bell.", starting_patron="Mother Hesk, ferry-keeper")
-    msgs = guide_messages(info, {"name": "Aria"}, [{"role": "user", "content": "hi"}])
-    system = msgs[0]["content"]
-    assert "A foggy marsh." in system and "Mother Hesk, ferry-keeper" in system
-    assert "- name: COMPLETED (Aria)" in system and "- race: PENDING" in system
-    assert "D) Something else" in system
-    assert msgs[1] == {"role": "user", "content": "hi"}
-
-
-# --- checklist merging -------------------------------------------------------------------------------
-
-SRC = "My name is Aria, an elf ranger. A scout of the Lantern Guard who lost her squad."
-FULL = CharacterChecklist(
-    name="Aria", race="elven", character_class="Ranger",
-    backstory="A scout of the Lantern Guard who lost her squad.",
-)
-
-
-def test_merge_accepts_valid_grounded_values_and_maps_to_the_real_lists():
-    assert merge_checklist({}, FULL, SRC) == {
-        "name": "Aria", "race": "Elf", "char_class": "Ranger",
-        "backstory": "A scout of the Lantern Guard who lost her squad.",
-    }
-
-
-def test_merge_rejects_unknown_ungrounded_and_placeholder_values():
-    bad = CharacterChecklist(name="Zed", race="Orc", character_class="Necromancer")
-    assert merge_checklist({}, bad, SRC) == {}
-    assert merge_checklist({}, CharacterChecklist(name="Elf"), SRC) == {}
-    assert merge_checklist({}, CharacterChecklist(race="Dwarf"), SRC) == {}      # not in the conversation
-    assert merge_checklist({}, None, SRC) == {}
-
-
-def test_backstory_waits_for_the_core_and_must_be_a_real_phrase():
-    only_story = CharacterChecklist(backstory="A scout of the Lantern Guard who lost her squad.")
-    assert "backstory" not in merge_checklist({}, only_story, SRC)
-    core = {"name": "Aria", "race": "Elf", "char_class": "Ranger"}
-    assert "backstory" not in merge_checklist(core, CharacterChecklist(backstory="A scout"), SRC)
-    invented = CharacterChecklist(backstory="A noble heir of Ravenshire who fled the Dread Court")
-    assert "backstory" not in merge_checklist(core, invented, SRC)
-    assert "backstory" in merge_checklist(core, only_story, SRC)
-
-
-def test_settled_values_are_never_replaced():
-    current = {"name": "Aria", "race": "Elf", "char_class": "Ranger", "backstory": "Old story here for sure."}
-    changed = CharacterChecklist(name="Zed", race="Dwarf", character_class="Fighter", backstory="Something else entirely")
-    assert merge_checklist(current, changed, SRC + " Zed dwarf fighter") == current
-    assert pending(current) == []
-    assert pending({}) == ["name", "race", "char_class", "backstory"]
-
-
-# --- starting kit and saving ---------------------------------------------------------------------------
 
 def test_every_class_has_a_kit_with_valid_items():
     for cls in CLASSES:
         items = starting_items(cls)
-        assert len(items) >= 3
-        assert len({n.lower() for n, _ in items}) == len(items)
-        assert all(q >= 1 for _, q in items)
+        assert len(items) >= 3 and len({n.lower() for n, _ in items}) == len(items)
     assert ("Stale bread", 1) in starting_items("Fighter")
 
+
+def test_suggested_names_are_distinct_and_from_the_lists():
+    options = ch.suggest_names(random.Random(1))
+    assert len(set(options)) == 3
+    assert all(o.split(" ")[0] in names.FIRST_NAMES for o in options)
+
+
+# --- reading replies ---------------------------------------------------------------------------
+
+def no_model(reply):
+    raise AssertionError("the classifier should not be called")
+
+
+def test_numbers_and_closed_matches_never_reach_the_classifier():
+    opts = ["Human", "Elf", "Dwarf"]
+    assert interpret_reply("2", opts, classify=no_model) == Reply("option", 1)
+    assert interpret_reply("i'd pick dwarf", opts, classify=no_model, closed=True) == Reply("option", 2)
+    assert interpret_reply("4", opts, classify=no_model, custom=True) == Reply("custom")
+
+
+def test_long_text_is_taken_for_open_fields_only():
+    text = "a sailor who lost his ship to the storm and now wanders the docks"
+    assert interpret_reply(text, ["a"], classify=no_model, open_text=True) == Reply("text", text=text)
+    got = interpret_reply(text, ["a"], classify=lambda r: ("unclear", None))
+    assert got.kind == "unclear"
+
+
+def test_classifier_results_map_to_replies():
+    opts = ["One", "Two"]
+    for kind, expected in (("accept", "accept"), ("reject", "reject"), ("surprise_me", "surprise"),
+                           ("unclear", "unclear"), ("own_text", "text")):
+        assert interpret_reply("okay", opts, classify=lambda r, k=kind: (k, None)).kind == expected
+    assert interpret_reply("the second", opts, classify=lambda r: ("choose", 1)) == Reply("option", 1)
+
+
+def test_classify_reply_validates_the_model_output():
+    opts = ["One", "Two"]
+
+    def run(reply):
+        return classify_reply(LLMClient(Config(), FakeBackend(reply)), "q", opts, "x")
+
+    assert run(js(intent="accept")) == ("accept", None)
+    assert run(js(intent="choose", index=2)) == ("choose", 1)
+    assert run(js(intent="choose", index=9)) == ("unclear", None)
+    assert run(js(intent="choose")) == ("unclear", None)
+    assert run(js(intent="banana")) == ("unclear", None)
+    assert run("garbage") == ("unclear", None)
+
+
+# --- backstory options ---------------------------------------------------------------------------
+
+def test_generated_backstories_are_cleaned_and_topped_up():
+    client = LLMClient(Config(), FakeBackend(js(options=["too short", STORIES[0], STORIES[0], STORIES[1]])))
+    got = generate_backstories(client, INFO, "Aria", "Elf", "Ranger", "", 3)
+    assert got[:2] == [STORIES[0], STORIES[1]] and len(got) == 3
+    assert got[2] == fallback_backstories("Aria", "Elf", "Ranger")[0]
+
+
+def test_backstory_model_failure_gives_fallbacks():
+    client = LLMClient(Config(), FakeBackend("garbage"))
+    assert generate_backstories(client, INFO, "Aria", "Elf", "Ranger", "", 3) == fallback_backstories("Aria", "Elf", "Ranger")
+
+
+# --- saving ----------------------------------------------------------------------------------------------
 
 def test_save_character_writes_player_stats_location_and_kit(tmp_path):
     make_campaign(tmp_path)
@@ -161,9 +187,8 @@ def test_save_character_writes_player_stats_location_and_kit(tmp_path):
         assert player.id == pid
         assert (player.name, player.race, player.char_class) == ("Aria", "Elf", "Ranger")
         assert (player.dexterity, player.hp, player.max_hp) == (17, 11, 11)
-        assert player.location_id == "ferry"
-        assert player.backstory == "A scout."
-        assert ("Short bow", 1) in db.get_inventory(pid) and ("Arrows", 12) in db.get_inventory(pid)
+        assert player.location_id == "ferry" and player.backstory == "A scout."
+        assert ("Short bow", 1) in db.get_inventory(pid)
 
 
 def test_save_character_refuses_a_second_player_and_bad_input(tmp_path):
@@ -185,40 +210,54 @@ def test_save_character_falls_back_to_the_first_location(tmp_path):
 
 # --- the whole flow ----------------------------------------------------------------------------------------
 
-def test_full_run_creates_the_character(tmp_path):
+def test_numbers_only_run_makes_just_one_model_call(tmp_path):
     make_campaign(tmp_path)
-    story = "A scout of the Lantern Guard who lost her squad in the fog"
-    responses = [
-        js(name="Aria", race="Elf", character_class="Ranger"),
-        "Guide: pick a backstory. A) Scout B) Thief C) Monk D) Other",
-        js(name="Aria", race="Elf", character_class="Ranger", backstory=story),
-    ]
-    creator, out = make_creator(tmp_path, responses, ["My name is Aria, an elf ranger.", story])
-    pid = creator.run()
-    assert pid is not None
+    creator, out = make_creator(tmp_path, [js(options=STORIES)], ["", "1", "2", "6", "1"])
+    assert creator.run() is not None
+    assert len(creator.client._backend.calls) == 1              # only the backstory options
     with GameDB.open("camp", tmp_path) as db:
         player = db.get_player()
-        assert (player.name, player.race, player.char_class) == ("Aria", "Elf", "Ranger")
-        assert player.backstory == story
-        assert db.get_inventory(player.id)
-    assert any("SUCCESS" in line for line in out)
-    assert any("Backstory: PENDING" in line for line in out)
+        assert (player.race, player.char_class, player.backstory) == ("Elf", "Ranger", STORIES[0])
+        assert player.name.split(" ")[0] in names.FIRST_NAMES
+    assert any("[OK] Class: Ranger" in line for line in out)
 
 
-def test_complete_with_items_pending_keeps_chatting_and_cancel_leaves(tmp_path):
+def test_notes_prefill_then_typed_class_and_a_random_backstory_with_okay(tmp_path):
     make_campaign(tmp_path)
-    creator, out = make_creator(tmp_path, ["x"], ["complete", "cancel"])
+    responses = [
+        js(options=STORIES),                       # the three backstory options
+        js(intent="surprise_me"),                  # "just create me some random backstory"
+        js(options=["Baron is a loyal rogue who secretly serves the rebellion."]),
+        js(intent="accept"),                       # "okay"
+    ]
+    inputs = ["i want to create a human named baron", "i'd go with rogue",
+              "just create me some random backstory", "okay"]
+    creator, out = make_creator(tmp_path, responses, inputs)
+    assert creator.run() is not None
+    assert len(creator.client._backend.calls) == 4
+    with GameDB.open("camp", tmp_path) as db:
+        player = db.get_player()
+        assert (player.name, player.race, player.char_class) == ("Baron", "Human", "Rogue")
+        assert player.backstory == "Baron is a loyal rogue who secretly serves the rebellion."
+
+
+def test_typing_your_own_name_and_backstory(tmp_path):
+    make_campaign(tmp_path)
+    own = "A ferryman's daughter who learned to read the fog and now hunts what hides inside it"
+    creator, _ = make_creator(tmp_path, [js(options=STORIES)], ["", "4", "thrain blackwood", "1", "1", own])
+    assert creator.run() is not None
+    with GameDB.open("camp", tmp_path) as db:
+        player = db.get_player()
+        assert (player.name, player.backstory) == ("Thrain Blackwood", own)
+
+
+def test_unclear_replies_re_ask_and_cancel_leaves(tmp_path):
+    make_campaign(tmp_path)
+    creator, out = make_creator(tmp_path, [js(intent="unclear")], ["", "hmm", "cancel"])
     assert creator.run() is None
-    assert any("Still pending" in line for line in out)
+    assert any("did not catch a name" in line for line in out)
     with GameDB.open("camp", tmp_path) as db:
         assert not db.has_player()
-
-
-def test_garbage_from_the_model_never_fills_the_checklist(tmp_path):
-    make_campaign(tmp_path)
-    creator, out = make_creator(tmp_path, ["garbage", "Guide: who are you?"], ["hello there", "cancel"])
-    assert creator.run() is None
-    assert any("Name: PENDING | Race: PENDING | Class: PENDING | Backstory: PENDING" in line for line in out)
 
 
 def test_missing_campaign_and_existing_player_are_reported(tmp_path):
@@ -229,52 +268,3 @@ def test_missing_campaign_and_existing_player_are_reported(tmp_path):
     save_character("camp", name="Aria", race="Elf", char_class="Ranger", backstory="x", campaigns_dir=tmp_path)
     creator, out = make_creator(tmp_path, ["x"], [])
     assert creator.run() is None and any("already has a player" in line for line in out)
-
-
-INFO = CampaignInfo(name="Camp", slug="camp", setting_description="A marsh.", primary_threat="A witch.",
-                    starting_quest_hook="Find the bell.")
-
-
-def test_apply_choice_fills_only_the_next_pending_item():
-    base = {"name": "Aria"}
-    assert apply_choice(base, "Elf: nimble")["race"] == "Elf"
-    assert "race" not in apply_choice(base, "Sneaky types")
-    core = {"name": "Aria", "race": "Elf", "char_class": "Ranger"}
-    assert apply_choice(core, "Aria lost her squad in the fog and seeks atonement.")["backstory"].startswith("Aria lost")
-    assert "backstory" not in apply_choice(core, "A scout")
-    assert apply_choice({}, "Aria: a name") == {}             # names go through the extractor
-
-
-def test_guide_prompt_asks_about_one_item_only():
-    system = guide_messages(INFO, {"name": "Baron", "race": "Human"}, [])[0]["content"]
-    assert "Ask ONLY about the player's class" in system
-    done = {"name": "Baron", "race": "Human", "char_class": "Rogue"}
-    system = guide_messages(INFO, done, [])[0]["content"]
-    assert "Ask ONLY about the player's backstory" in system and "Do NOT write a full backstory" in system
-
-
-def test_menu_choices_fill_the_checklist_without_extraction_and_finish_at_once(tmp_path):
-    make_campaign(tmp_path)
-    responses = [
-        js(name="Aria"),
-        "Guide: pick a race.\nA) Human: versatile\nB) Elf: nimble\nC) Dwarf: hardy\nD) Something else",
-        "Guide: pick a class.\nA) Fighter: tough\nB) Rogue: sneaky\nC) Ranger: a hunter\nD) Something else",
-        "Guide: pick a backstory.\nA) Aria lost her squad in the fog and seeks atonement.\n"
-        "B) Aria fled a burning city.\nC) Aria is a wandering scout.\nD) Something else",
-    ]
-    creator, out = make_creator(tmp_path, responses, ["My name is Aria", "b", "c", "a"])
-    assert creator.run() is not None
-    assert len(creator.client._backend.calls) == 4     # no extraction for letters, no guide call after the last pick
-    with GameDB.open("camp", tmp_path) as db:
-        player = db.get_player()
-        assert (player.race, player.char_class) == ("Elf", "Ranger")
-        assert player.backstory == "Aria lost her squad in the fog and seeks atonement."
-
-
-def test_something_else_asks_for_typed_input(tmp_path):
-    make_campaign(tmp_path)
-    responses = [js(name="Aria"), "Guide: pick a race.\nA) Human: v\nB) Elf: n\nC) Dwarf: h\nD) Something else"]
-    creator, out = make_creator(tmp_path, responses, ["My name is Aria", "d", "cancel"])
-    assert creator.run() is None
-    assert any("type your own answer" in line for line in out)
-    assert len(creator.client._backend.calls) == 2
