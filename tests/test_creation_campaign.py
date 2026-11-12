@@ -6,7 +6,6 @@ import random
 from aether.config import Config
 from aether.creation import campaign as cc
 from aether.creation.campaign import (
-    CampaignChecklist,
     CampaignCreator,
     DerivedMetadata,
     Storyline,
@@ -14,15 +13,15 @@ from aether.creation.campaign import (
     WorldMapDraft,
     build_world,
     choose_name,
-    merge_checklist,
     normalize_metadata,
     normalize_storyline,
-    pending,
     save_campaign,
     prettify_name,
     storyline_messages,
-    apply_choice,
     compose_patron,
+    generate_field_options,
+    field_options_messages,
+    valid_field_text,
 )
 from aether.creation import names
 from aether.db import GameDB
@@ -47,44 +46,11 @@ def pairs_of(world):
 
 def test_lists_are_joined_into_text():
     assert Storyline.model_validate_json('{"middle":["a","b"]}').middle == "a b"
-    assert CampaignChecklist.model_validate_json('{"primary_threat":["x","y"]}').primary_threat == "x y"
     assert DerivedMetadata.model_validate_json('{"patron_role":["a","cook"]}').patron_role == "a cook"
 
 
 def test_everything_is_optional():
     assert Storyline.model_validate_json("{}").beginning == ""
-    assert CampaignChecklist.model_validate_json("{}").setting_description is None
-
-
-# --- checklist ---------------------------------------------------------------------------------
-
-SRC = "I want a fog-choked marsh. The Swamp Witch is the threat. Children went silent overnight."
-EVERYTHING = CampaignChecklist(
-    setting_description="A fog-choked marsh.",
-    primary_threat="The Swamp Witch.",
-    starting_quest_hook="Children went silent.",
-)
-
-
-def test_merge_checklist_accepts_one_grounded_field_per_turn():
-    first = merge_checklist({}, EVERYTHING, SRC)
-    assert first == {"setting_description": "A fog-choked marsh."}
-    second = merge_checklist(first, EVERYTHING, SRC)
-    assert list(second) == ["setting_description", "primary_threat"]
-    third = merge_checklist(second, EVERYTHING, SRC)
-    assert pending(third) == []
-    assert merge_checklist(third, None, SRC) == third
-    changed = CampaignChecklist(setting_description="Something else entirely different")
-    assert merge_checklist(third, changed, SRC) == third          # settled values are never replaced
-
-
-def test_merge_checklist_rejects_fragments_and_invented_values():
-    # the real failure: one answer filled all three fields with fragments
-    src = "dark mystery decaying ruins"
-    assert merge_checklist({}, CampaignChecklist(setting_description="dark"), src) == {}
-    assert merge_checklist({}, CampaignChecklist(setting_description="decaying ruins"), src) == {}
-    assert merge_checklist({}, CampaignChecklist(setting_description="A frozen northern citadel"), "I like marsh") == {}
-    assert merge_checklist({}, CampaignChecklist(primary_threat="The Swamp Witch."), SRC) == {}   # not the first pending
 
 
 # --- normalising model output ------------------------------------------------------------------
@@ -234,87 +200,6 @@ def make_creator(tmp_path, responses, inputs):
     return creator, out
 
 
-CHECKLIST = js(setting_description="A fog-choked marsh.", primary_threat="The Swamp Witch.",
-               starting_quest_hook="Children went silent.")
-
-
-# Four chat turns: the checklist now fills one field per turn (setting, threat, hook).
-CHAT_INPUTS = [
-    "I want a fog-choked marsh",
-    "The Swamp Witch is the threat",
-    "Children went silent overnight",
-    "Yes that hook",
-]
-CHAT_RESPONSES = [
-    "Guide: pick a setting. A) Marsh B) Desert C) Tundra D) Other",
-    CHECKLIST,
-    "Guide: pick a threat. A) Witch B) Dragon C) Cult D) Other",
-    CHECKLIST,
-    "Guide: pick a hook. A) Silence B) Plague C) War D) Other",
-    CHECKLIST,
-]
-
-
-def test_full_run_creates_a_complete_campaign(tmp_path):
-    responses = [
-        *CHAT_RESPONSES,
-        js(theme_vibe="Gothic Dark Fantasy", patron_role="the ferry-keeper",
-           suggested_names=["The Drowned Bell", "Marsh Song", "Silent Fog"]),
-        js(beginning="It begins.", middle=["Complication one.", "Complication two."], end="It ends.",
-           victory_condition="Defeat the witch."),
-        js(locations=[
-            {"id": "mirewick_ferry", "name": "Mirewick Ferry", "brief_concept": "A landing.", "connections": ["village"]},
-            {"id": "village", "name": "Village", "brief_concept": "A silent village.", "connections": ["mirewick_ferry", "causeway"]},
-            {"id": "causeway", "name": "Causeway", "brief_concept": "A sunken road.", "connections": ["village", "chapel"]},
-            {"id": "chapel", "name": "Chapel", "brief_concept": "A flooded chapel.", "connections": ["causeway"]},
-            {"id": "reed_hut", "name": "Reed Hut", "brief_concept": "A hut.", "connections": []},
-        ]),
-        js(beats=[{"title": f"Beat {i}", "objective": f"Do {i}."} for i in range(1, 5)]),
-    ]
-    creator, out = make_creator(tmp_path, responses, [*CHAT_INPUTS, "1"])
-    assert creator.run() == "the_drowned_bell"
-
-    db = GameDB.open("the_drowned_bell", tmp_path)
-    info = db.get_campaign()
-    assert info.name == "The Drowned Bell"
-    patron_name, _, patron_role = info.starting_patron.partition(", ")
-    first, _, last = patron_name.partition(" ")
-    assert first in names.FIRST_NAMES and last in names.LAST_NAMES and patron_role == "the ferry-keeper"
-    assert info.starting_location_id == "mirewick_ferry"
-    assert info.storyline_middle == "Complication one. Complication two."
-    assert len(db.list_locations()) == 5
-    assert db.get_connected_locations("reed_hut")                      # the isolated hut was connected
-    assert len(db.get_beats()) == 4
-    assert not db.has_player()
-    db.close()
-    assert any("SUCCESS" in line for line in out)
-
-
-def test_complete_with_items_pending_keeps_chatting_and_cancel_leaves(tmp_path):
-    creator, out = make_creator(tmp_path, ["x"], ["complete", "cancel"])
-    assert creator.run() is None
-    assert any("Still pending" in line for line in out)
-    assert GameDB.list_campaigns(tmp_path) == []
-
-
-def test_garbage_from_the_model_still_creates_a_playable_campaign(tmp_path):
-    creator, _ = make_creator(tmp_path, [*CHAT_RESPONSES, "garbage"], [*CHAT_INPUTS, "1"])
-    slug = creator.run()
-    assert slug == "an_unknown_journey"
-    db = GameDB.open(slug, tmp_path)
-    assert len(db.list_locations()) == 3
-    assert len(db.get_beats()) == 3
-    assert db.get_campaign().starting_location_id == "starting_point"
-    db.close()
-
-
-def test_two_campaigns_with_the_same_name_get_different_slots(tmp_path):
-    for _ in range(2):
-        creator, _ = make_creator(tmp_path, [*CHAT_RESPONSES, "garbage"], [*CHAT_INPUTS, "1"])
-        creator.run()
-    assert sorted(GameDB.list_campaigns(tmp_path)) == ["an_unknown_journey", "an_unknown_journey_2"]
-
-
 def test_prettify_name():
     assert prettify_name("cult_haven") == "Cult Haven"
     assert prettify_name("chapel") == "Chapel"
@@ -402,35 +287,139 @@ def test_metadata_prompt_gives_the_name_and_asks_only_for_the_role():
     assert "role of Odalric Venn" in system and "Do not write the name" in system
 
 
-def test_apply_choice_fills_the_first_pending_item_and_rejects_fragments():
-    assert apply_choice({}, "A fog-choked marsh kingdom") == {"setting_description": "A fog-choked marsh kingdom"}
-    assert apply_choice({}, "Dark marsh") == {}
-    done = {k: "x y z" for k in cc.CHECKLIST_KEYS}
-    assert apply_choice(done, "Something else entirely") == done
-    first = apply_choice({}, "A fog-choked marsh kingdom")
-    assert list(apply_choice(first, "The Swamp Witch Orsolya")) == ["setting_description", "primary_threat"]
+OPTS_A = js(options=["A fog-choked marsh kingdom of drowned bells", "A sunburnt desert empire of buried gods",
+                     "A frozen northern citadel under endless storms"])
+OPTS_B = js(options=["A sunken coastal city of salt and ruin", "A haunted pine forest of whispering trees",
+                     "A volcanic island of ash and fire"])
+OPTS_THREAT = js(options=["A cult of drowned priests", "The Swamp Witch Orsolya of the mire",
+                          "A rival warlord with a hungry army"])
+OPTS_HOOK = js(options=["Children have gone silent overnight", "A plague sweeps the nearby village",
+                        "A stranger offers a map to a hidden vault"])
+BUILD = [
+    js(theme_vibe="Gothic Dark Fantasy", patron_role="the ferry-keeper",
+       suggested_names=["The Drowned Bell", "Marsh Song", "Silent Fog"]),
+    js(beginning="It begins.", middle=["Complication one.", "Complication two."], end="It ends.",
+       victory_condition="Defeat the witch."),
+    js(locations=[
+        {"id": "mirewick_ferry", "name": "Mirewick Ferry", "brief_concept": "A landing.", "connections": ["village"]},
+        {"id": "village", "name": "Village", "brief_concept": "A silent village.", "connections": ["mirewick_ferry", "causeway"]},
+        {"id": "causeway", "name": "Causeway", "brief_concept": "A sunken road.", "connections": ["village", "chapel"]},
+        {"id": "chapel", "name": "Chapel", "brief_concept": "A flooded chapel.", "connections": ["causeway"]},
+        {"id": "reed_hut", "name": "Reed Hut", "brief_concept": "A hut.", "connections": []},
+    ]),
+    js(beats=[{"title": f"Beat {i}", "objective": f"Do {i}."} for i in range(1, 5)]),
+]
 
 
-def test_menu_letters_build_a_campaign_without_extraction_calls(tmp_path):
-    responses = [
-        "Pick a setting.\nA) A fog-choked marsh kingdom\nB) A sunburnt desert empire\nC) A frozen citadel\nD) Something else",
-        "Pick a threat.\nA) A cult of drowned priests\nB) The Swamp Witch Orsolya\nC) A rival warlord's army\nD) Something else",
-        "Pick a hook.\nA) Children have gone silent\nB) A plague sweeps the village\nC) A stranger offers a map\nD) Something else",
-        js(theme_vibe="Gothic", patron_role="a ferry-keeper", suggested_names=["Marsh Song", "Silent Fog", "Drowned Bell"]),
-        "garbage",
-    ]
-    creator, _ = make_creator(tmp_path, responses, ["I want something spooky", "a", "b", "c", "1"])
-    assert creator.run() == "marsh_song"
-    with GameDB.open("marsh_song", tmp_path) as db:
+# --- field options ------------------------------------------------------------------------------
+
+def test_field_options_prompt_carries_earlier_answers_and_notes():
+    msgs = field_options_messages("primary_threat", {"setting_description": "A foggy marsh kingdom"}, "something spooky", 3)
+    assert "exactly 3 different options" in msgs[0]["content"] and "<option 1>" in msgs[0]["content"]
+    assert "Setting (already chosen): A foggy marsh kingdom" in msgs[1]["content"]
+    assert "Player's ideas: something spooky" in msgs[1]["content"]
+    assert "(no ideas given yet)" in field_options_messages("setting_description", {}, "", 3)[1]["content"]
+
+
+def test_field_options_are_cleaned_and_topped_up():
+    client = LLMClient(Config(), FakeBackend(js(options=[
+        "  'A fog-choked marsh kingdom'  ", "a fog-choked marsh kingdom", "too short", "A desert of buried gods",
+    ])))
+    got = generate_field_options(client, "setting_description", {}, "")
+    assert got[:2] == ["A fog-choked marsh kingdom", "A desert of buried gods"]
+    assert got[2] == cc.FALLBACK_FIELD_OPTIONS["setting_description"][0] and len(got) == 3
+
+
+def test_field_options_model_failure_gives_fallbacks():
+    client = LLMClient(Config(), FakeBackend("garbage"))
+    assert generate_field_options(client, "primary_threat", {}, "") == list(cc.FALLBACK_FIELD_OPTIONS["primary_threat"])
+
+
+def test_valid_field_text():
+    assert valid_field_text("  A fog-choked marsh  ") == "A fog-choked marsh"
+    assert valid_field_text("dark") == "" and valid_field_text("decaying ruins") == ""
+
+
+def test_every_field_has_three_usable_fallbacks():
+    assert set(cc.FALLBACK_FIELD_OPTIONS) == set(cc.CHECKLIST_KEYS)
+    for options in cc.FALLBACK_FIELD_OPTIONS.values():
+        assert len(set(options)) == 3 and all(valid_field_text(o) == o for o in options)
+
+
+# --- the whole flow --------------------------------------------------------------------------------
+
+def test_numbers_only_run_builds_a_campaign_with_no_classifier_calls(tmp_path):
+    responses = [OPTS_A, OPTS_THREAT, OPTS_HOOK, *BUILD]
+    creator, out = make_creator(tmp_path, responses, ["something spooky", "1", "2", "3", "1"])
+    assert creator.run() == "the_drowned_bell"
+    assert len(creator.client._backend.calls) == 7        # 3 option menus + metadata, storyline, map, beats
+
+    with GameDB.open("the_drowned_bell", tmp_path) as db:
         info = db.get_campaign()
-        assert info.setting_description == "A fog-choked marsh kingdom"
-        assert info.primary_threat == "The Swamp Witch Orsolya"
-        assert info.starting_quest_hook == "A stranger offers a map"
-        assert info.starting_patron.endswith(", a ferry-keeper")
+        assert info.setting_description == "A fog-choked marsh kingdom of drowned bells"
+        assert info.primary_threat == "The Swamp Witch Orsolya of the mire"
+        assert info.starting_quest_hook == "A stranger offers a map to a hidden vault"
+        patron_name, _, patron_role = info.starting_patron.partition(", ")
+        first, _, last = patron_name.partition(" ")
+        assert first in names.FIRST_NAMES and last in names.LAST_NAMES and patron_role == "the ferry-keeper"
+        assert info.starting_location_id == "mirewick_ferry"
+        assert info.storyline_middle == "Complication one. Complication two."
+        assert len(db.list_locations()) == 5 and len(db.get_beats()) == 4
+        assert db.get_connected_locations("reed_hut")
+        assert not db.has_player()
+    assert any("[OK] Threat: The Swamp Witch Orsolya of the mire" in line for line in out)
+    assert any("SUCCESS" in line for line in out)
 
 
-def test_something_else_asks_for_typed_input_in_campaign_creation(tmp_path):
-    menu = "Pick a setting.\nA) A fog-choked marsh kingdom\nB) A sunburnt desert empire\nC) A frozen citadel\nD) Something else"
-    creator, out = make_creator(tmp_path, [menu], ["I want something spooky", "d", "cancel"])
+def test_the_notes_reach_the_options_prompt(tmp_path):
+    creator, _ = make_creator(tmp_path, [OPTS_A], ["something spooky", "cancel"])
     assert creator.run() is None
-    assert any("type your own answer" in line for line in out)
+    prompt = creator.client._backend.calls[0]["messages"][1]["content"]
+    assert "Player's ideas: something spooky" in prompt
+
+
+def test_typing_your_own_answers(tmp_path):
+    own = "A drowned kingdom of salt and bells where the tide never goes out"
+    creator, _ = make_creator(tmp_path, [OPTS_A, OPTS_THREAT, OPTS_HOOK, *BUILD],
+                              ["", own, "4", "The salt king returns from the sea", "1", "1"])
+    assert creator.run() is not None
+    with GameDB.open("the_drowned_bell", tmp_path) as db:
+        info = db.get_campaign()
+        assert info.setting_description == own
+        assert info.primary_threat == "The salt king returns from the sea"
+
+
+def test_fragments_are_re_asked_and_cancel_leaves(tmp_path):
+    creator, out = make_creator(tmp_path, [OPTS_A, js(intent="unclear")], ["", "dark", "cancel"])
+    assert creator.run() is None
+    assert any("Pick a number" in line for line in out)
+    assert creator.values == {} and GameDB.list_campaigns(tmp_path) == []
+
+
+def test_asking_for_different_ideas_regenerates_the_menu(tmp_path):
+    creator, _ = make_creator(tmp_path, [OPTS_A, js(intent="reject"), OPTS_B], ["", "show me different ones", "1", "cancel"])
+    assert creator.run() is None
+    assert creator.values == {"setting_description": "A sunken coastal city of salt and ruin"}
+
+
+def test_ask_me_to_pick_chooses_one_of_the_options(tmp_path):
+    creator, _ = make_creator(tmp_path, [OPTS_A, js(intent="surprise_me"), OPTS_THREAT], ["", "you pick", "cancel"])
+    assert creator.run() is None
+    assert creator.values["setting_description"] in json.loads(OPTS_A)["options"]
+
+
+def test_garbage_from_the_model_still_creates_a_playable_campaign(tmp_path):
+    creator, _ = make_creator(tmp_path, ["garbage"], ["", "1", "1", "1", "1"])
+    slug = creator.run()
+    assert slug == "an_unknown_journey"
+    with GameDB.open(slug, tmp_path) as db:
+        assert db.get_campaign().setting_description == cc.FALLBACK_FIELD_OPTIONS["setting_description"][0]
+        assert len(db.list_locations()) == 3 and len(db.get_beats()) == 3
+        assert db.get_campaign().starting_location_id == "starting_point"
+
+
+def test_two_campaigns_with_the_same_name_get_different_slots(tmp_path):
+    for _ in range(2):
+        creator, _ = make_creator(tmp_path, ["garbage"], ["", "1", "1", "1", "1"])
+        creator.run()
+    assert sorted(GameDB.list_campaigns(tmp_path)) == ["an_unknown_journey", "an_unknown_journey_2"]

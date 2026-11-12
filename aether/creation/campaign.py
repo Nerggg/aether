@@ -1,36 +1,42 @@
-"""Campaign creation.
+"""Campaign creation as a form that code drives.
 
-Flow (the same for the player as before):
+Code owns the three fields (setting, threat, quest hook) and asks them in
+order, so it always knows which question the player is answering. For each
+field one structured call writes three options that fit the earlier answers,
+and code renders them as a numbered menu. A reply is read by
+`character.interpret_reply`: a number first, long typed text next, and the
+small intent classifier only for what is left ("another", "you pick", "okay").
 
-    brainstorm chat -> checklist complete -> name suggestions -> storyline
-    -> world map -> story beats -> save
+Everything the model returns is cleaned in code (`generate_field_options`,
+`build_world`, `normalize_*`), because a 3B model often gives bad ids, broken
+connections or the wrong JSON shape. Each step has a fallback, so creation
+never dead-ends. Every LLM call happens before anything touches the disk, and
+the save is one transaction, so a failure never leaves a half-made campaign.
 
-Every LLM call happens before anything touches the disk, and the save is one
-transaction, so a failure never leaves a half-made campaign behind.
+Flow:
 
-Everything the model returns is cleaned in code (`build_world`,
-`normalize_*`), because a 3B model often gives bad ids, broken connections or
-the wrong JSON shape. Each step has a fallback, so creation never dead-ends.
+    notes -> setting -> threat -> hook -> name -> storyline -> world map
+    -> story beats -> save
 
 Run it on its own:  python -m aether.creation.campaign
 """
 
 from __future__ import annotations
 
-import re
 import random
+import re
 import shutil
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from string import capwords
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field, field_validator
 
-from aether.db import GameDB, slugify
-from aether.creation.menus import CUSTOM_CHOICE, last_assistant_reply, resolve_choice
+from aether.creation.character import Reply, classify_reply, interpret_reply
 from aether.creation.names import pick_patron_name
+from aether.db import GameDB, slugify
 from aether.llm import calls
 from aether.llm.client import LLMClient, LLMError, Messages
 from aether.models import CampaignInfo, Location, StoryBeat
@@ -48,8 +54,11 @@ MAX_INDEX_GAP = 2   # a connection may skip at most one location in the model's 
 NAME_COUNT = 3
 FIELD_MAX_CHARS = 800
 MIN_FIELD_WORDS = 3   # "dark" or "decaying ruins" is a fragment, not a setting
+OPTION_COUNT = 3
+OPTION_MAX_CHARS = 220
+FIELD_TEXT_MAX_CHARS = 300
 
-CHECKLIST_MAX_TOKENS = 300
+FIELD_OPTIONS_MAX_TOKENS = 350
 METADATA_MAX_TOKENS = 300
 STORYLINE_MAX_TOKENS = 900
 MAP_MAX_TOKENS = 900
@@ -57,6 +66,32 @@ MAP_MAX_TOKENS = 900
 FALLBACK_NAMES = ("An Unknown Journey", "Echoes of Adventure", "Tales of the Unknown")
 DEFAULT_PATRON_ROLE = "a local guide"
 _ARTICLES = ("a", "an", "the", "old", "young")
+
+# What each field is, for the options prompt.
+FIELD_DESCRIPTIONS = {
+    "setting_description": "the setting: the world's environment, atmosphere and style",
+    "primary_threat": "the main threat: a villain, faction or force the player will face",
+    "starting_quest_hook": "the quest hook: the opening call to adventure that sets the player in motion",
+}
+
+# Used when the model gives too few usable options, so a menu is never short.
+FALLBACK_FIELD_OPTIONS: Dict[str, Tuple[str, str, str]] = {
+    "setting_description": (
+        "A fog-choked marsh kingdom of sunken ruins and drowned bells",
+        "A sun-scorched desert of buried cities and wandering caravans",
+        "A frozen northern frontier of ice-bound forts and howling storms",
+    ),
+    "primary_threat": (
+        "A secret cult that is slowly corrupting the local villages",
+        "An ancient sorcerer returning to reclaim a lost throne",
+        "A ruthless warlord whose army marches on the nearest town",
+    ),
+    "starting_quest_hook": (
+        "A frightened stranger begs the player to find someone who vanished",
+        "A mysterious letter points the player to a hidden place nearby",
+        "Strange events in a nearby village need someone brave to investigate",
+    ),
+}
 
 
 # --- schemas ---------------------------------------------------------------------------------
@@ -68,15 +103,8 @@ def _joined(value):
     return value
 
 
-class CampaignChecklist(BaseModel):
-    setting_description: Optional[str] = None
-    primary_threat: Optional[str] = None
-    starting_quest_hook: Optional[str] = None
-
-    @field_validator("*", mode="before")
-    @classmethod
-    def _text(cls, value):
-        return _joined(value)
+class FieldOptions(BaseModel):
+    options: List[str] = Field(default_factory=list)
 
 
 class DerivedMetadata(BaseModel):
@@ -113,6 +141,10 @@ class WorldMapDraft(BaseModel):
     locations: List[LocationDraft]
 
 
+class _Cancelled(Exception):
+    pass
+
+
 # --- prompts ---------------------------------------------------------------------------------
 
 def _facts(checklist: Dict[str, str]) -> str:
@@ -125,42 +157,29 @@ def _facts(checklist: Dict[str, str]) -> str:
     )
 
 
-def guide_messages(checklist: Dict[str, str], history: Sequence[Dict[str, str]]) -> Messages:
-    def status(key: str) -> str:
-        return "COMPLETED" if checklist.get(key) else "PENDING"
-
+def field_options_messages(key: str, answers: Dict[str, str], notes: str, count: int) -> Messages:
+    """Ask for `count` options for one field, given what is already settled."""
     system = "\n".join(
         [
-            "You are the World-Building Dungeon Master. Help the player settle exactly 3 campaign parameters:",
-            "1. setting_description (the world's environment and style)",
-            "2. primary_threat (the main threat, faction or antagonist)",
-            "3. starting_quest_hook (the opening call to adventure)",
+            "You help a player design a fantasy role-playing campaign.",
+            f"Write exactly {count} different options for {FIELD_DESCRIPTIONS[key]}.",
+            "- Each option is one sentence of 8 to 25 words.",
+            "- The options must be clearly different from each other.",
+            "- Every option must fit the answers already chosen and the player's ideas, if any.",
+            "- Do not use character names.",
             "",
-            "Current checklist:",
-            f"- setting_description: {status('setting_description')}",
-            f"- primary_threat: {status('primary_threat')}",
-            f"- starting_quest_hook: {status('starting_quest_hook')}",
-            "",
-            "INSTRUCTIONS",
-            "- Focus on PENDING parameters. Ask about ONE parameter at a time.",
-            "- Always present your question as a multiple-choice list in exactly this format:",
-            "  A) [Suggestion 1]",
-            "  B) [Suggestion 2]",
-            "  C) [Suggestion 3]",
-            "  D) Something else / Player's custom input",
-            "- Keep the introduction under 50 words, collaborative and immersive.",
+            "Reply as JSON in this shape (replace the <placeholders>):",
+            '{"options":["<option 1>","<option 2>","<option 3>"]}',
         ]
     )
-    return [{"role": "system", "content": system}, *history]
-
-
-def checklist_messages(history: Sequence[Dict[str, str]]) -> Messages:
-    system = (
-        "You are a strict data extraction system. Read the recent conversation and extract the campaign "
-        "details into the JSON schema. Only extract values the player has explicitly agreed on or chosen. "
-        "Use null for anything not decided. Do not invent details."
-    )
-    return [{"role": "system", "content": system}, *history[-4:]]
+    lines = []
+    if notes.strip():
+        lines.append(f"Player's ideas: {_clip(notes, 300)}")
+    for k in CHECKLIST_KEYS:
+        if answers.get(k):
+            lines.append(f"{CHECKLIST_LABELS[k]} (already chosen): {answers[k]}")
+    user = "\n".join(lines) or "(no ideas given yet)"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 def metadata_messages(checklist: Dict[str, str], patron_name: str) -> Messages:
@@ -234,33 +253,39 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit].rsplit(" ", 1)[0].rstrip(",;:-. ") + "..."
 
 
-def merge_checklist(current: Dict[str, str], parsed: Optional[CampaignChecklist], source: str) -> Dict[str, str]:
-    """Accept at most ONE new value per turn: the first pending item.
-
-    The guide asks about one thing at a time, so a model that fills several
-    fields after one answer is guessing. The value must also be a real phrase
-    (MIN_FIELD_WORDS or more) and be grounded in `source`, the conversation
-    text. A value that is rejected is simply asked about again. Settled
-    values are never overwritten.
-    """
-    merged = dict(current)
-    missing = pending(merged)
-    if parsed is None or not missing:
-        return merged
-    key = missing[0]
-    value = " ".join((getattr(parsed, key) or "").split())
-    if len(value.split()) >= MIN_FIELD_WORDS and calls.is_grounded(value, source):
-        merged[key] = value
-    return merged
+def pending(values: Dict[str, str]) -> List[str]:
+    return [k for k in CHECKLIST_KEYS if not values.get(k)]
 
 
-def pending(checklist: Dict[str, str]) -> List[str]:
-    return [k for k in CHECKLIST_KEYS if not checklist.get(k)]
+def valid_field_text(text: str) -> str:
+    """A typed or chosen field value, or '' if it is a fragment."""
+    text = _clip(text, FIELD_TEXT_MAX_CHARS)
+    return text if len(text.split()) >= MIN_FIELD_WORDS else ""
 
 
-def status_line(checklist: Dict[str, str]) -> str:
-    parts = [f"{CHECKLIST_LABELS[k]}: {'OK' if checklist.get(k) else 'PENDING'}" for k in CHECKLIST_KEYS]
-    return "[Checklist] " + " | ".join(parts)
+def generate_field_options(
+    client: LLMClient, key: str, answers: Dict[str, str], notes: str, count: int = OPTION_COUNT
+) -> List[str]:
+    """`count` distinct options for one field. Model output is cleaned, and
+    built-in options fill any gap, so the menu is never short."""
+    response = client.structured(
+        "creation", field_options_messages(key, answers, notes, count),
+        FieldOptions, max_tokens=FIELD_OPTIONS_MAX_TOKENS,
+    )
+    result: List[str] = []
+    seen = set()
+    for raw in (response.options if response else []):
+        text = valid_field_text(_clip(str(raw).strip(" \"'-*"), OPTION_MAX_CHARS))
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            result.append(text)
+    for fallback in FALLBACK_FIELD_OPTIONS[key]:
+        if len(result) >= count:
+            break
+        if fallback.lower() not in seen:
+            seen.add(fallback.lower())
+            result.append(fallback)
+    return result[:count]
 
 
 def normalize_metadata(resp: Optional[DerivedMetadata]) -> DerivedMetadata:
@@ -282,7 +307,7 @@ def normalize_metadata(resp: Optional[DerivedMetadata]) -> DerivedMetadata:
         patron_role=role or DEFAULT_PATRON_ROLE,
         suggested_names=names[:NAME_COUNT],
     )
-    
+
 
 def compose_patron(name: str, role: str) -> str:
     """'Odalric Venn' + 'a retired ferry-keeper' -> 'Odalric Venn, a retired ferry-keeper'.
@@ -299,22 +324,6 @@ def compose_patron(name: str, role: str) -> str:
             role = tail
     role = role.strip(" ,;:-.\"'")
     return f"{name}, {role or DEFAULT_PATRON_ROLE}"
-
-
-def apply_choice(current: Dict[str, str], option: str) -> Dict[str, str]:
-    """Fill the first pending item straight from a chosen menu option, with no LLM call.
-
-    The guide asks about one pending item at a time, so the choice belongs to it.
-    A fragment of fewer than MIN_FIELD_WORDS words is ignored.
-    """
-    merged = dict(current)
-    missing = pending(merged)
-    if not missing:
-        return merged
-    text = _clip(option, 300)
-    if len(text.split()) >= MIN_FIELD_WORDS:
-        merged[missing[0]] = text
-    return merged
 
 
 def normalize_storyline(resp: Optional[Storyline], checklist: Dict[str, str], patron: str) -> Storyline:
@@ -361,6 +370,7 @@ def fallback_world() -> World:
         Location("final_stronghold", "The Final Stronghold", "The place where the main threat waits."),
     ]
     return World(locations, [("starting_point", "the_long_road"), ("the_long_road", "final_stronghold")], True)
+
 
 def prettify_name(name: str) -> str:
     """'cult_haven' -> 'Cult Haven', 'oakwood manor - fall of the scholar' -> 'Oakwood Manor'.
@@ -498,92 +508,91 @@ class CampaignCreator:
         self.campaigns_dir = campaigns_dir
         self.input = input_fn
         self.print = print_fn
-        self.history: List[Dict[str, str]] = []
-        self.checklist: Dict[str, str] = {}
         self.rng = rng or random.Random()
+        self.values: Dict[str, str] = {}
+        self.notes = ""
 
     def run(self) -> Optional[str]:
         """Run creation. Returns the new campaign's slug, or None if cancelled or failed."""
         self._intro()
         try:
-            if not self._brainstorm():
-                self.print("\nCampaign creation cancelled.")
-                return None
+            self._collect()
             return self._finalize()
-        except (KeyboardInterrupt, EOFError):
+        except (_Cancelled, KeyboardInterrupt, EOFError):
             self.print("\nCampaign creation cancelled.")
         except LLMError as e:
             self.print(f"\n[LLM error] {e}")
         return None
 
-    # --- brainstorm ---
-
     def _intro(self) -> None:
         self.print("\n=======================================================")
         self.print("          AETHER: CAMPAIGN CREATION TERMINAL")
         self.print("=======================================================")
-        self.print("Tell me about the campaign you want to build, for example:")
-        self.print("'A dark-fantasy swamp where a swamp witch resides.'")
-        self.print("Once the setting, threat and quest hook are settled, the campaign builds")
-        self.print("automatically. Type 'complete' to build it early, or 'cancel' to leave.\n")
+        self.print("You will choose a setting, a threat and a quest hook. Answer with a number,")
+        self.print("or type what you want. Type 'cancel' at any time to leave.\n")
 
-    def _brainstorm(self) -> bool:
+    # --- input helpers ---
+
+    def _read(self, prompt: str = "\nYou: ", allow_empty: bool = False) -> str:
         while True:
-            text = self.input("\nYou: ").strip()
-            if not text:
-                continue
-            command = text.lower()
-            if command == "cancel":
-                return False
-            if command == "complete":
-                missing = pending(self.checklist)
-                if not missing:
-                    return True
-                labels = ", ".join(CHECKLIST_LABELS[k] for k in missing)
-                self.print(f"[System] Still pending: {labels}. Keep chatting to settle them.")
-                continue
+            text = self.input(prompt).strip()
+            if text.lower() == "cancel":
+                raise _Cancelled()
+            if text or allow_empty:
+                return text
 
-            choice = resolve_choice(text, last_assistant_reply(self.history))
-            if choice == CUSTOM_CHOICE:
-                self.print("[System] Go ahead and type your own answer.")
-                continue
-            if choice is not None:
-                self.history.append({"role": "user", "content": f"I choose: {choice}"})
-                self.checklist = apply_choice(self.checklist, choice)
-                self.print(status_line(self.checklist))
-            else:
-                self.history.append({"role": "user", "content": text})
-                if len(self.history) >= 2:
-                    self._update_checklist()
-                    self.print(status_line(self.checklist))
-            if not pending(self.checklist):
-                self.print("\n[System] All core elements are settled.")
-                return True
-            self._guide_reply()
+    def _show(self, title: str, lines: Sequence[str], custom: Optional[str] = None) -> None:
+        self.print(f"\n{title}")
+        for i, line in enumerate(lines, start=1):
+            self.print(f"  {i}. {line}")
+        if custom:
+            self.print(f"  {len(lines) + 1}. {custom}")
 
-    def _update_checklist(self) -> None:
-        parsed = self.client.structured(
-            "referee",
-            checklist_messages(self.history),
-            CampaignChecklist,
-            max_tokens=CHECKLIST_MAX_TOKENS,
-            temperature=0.0,
+    def _ask(self, question: str, options: Sequence[str], **kw) -> Reply:
+        reply = self._read()
+        return interpret_reply(
+            reply, options, classify=lambda r: classify_reply(self.client, question, options, r), **kw
         )
-        source = " ".join(m["content"] for m in self.history)
-        self.checklist = merge_checklist(self.checklist, parsed, source)
 
-    def _guide_reply(self) -> None:
-        self.print("\nGuide: ", end="", flush=True)
-        pieces: List[str] = []
-        for piece in self.client.stream("creation", guide_messages(self.checklist, self.history)):
-            self.print(piece, end="", flush=True)
-            pieces.append(piece)
-        self.print()
-        reply = "".join(pieces).strip()
-        if reply:
-            self.history.append({"role": "assistant", "content": reply})
-        else:
-            self.print("[System] The guide had nothing to say. Keep describing your campaign.")
+    # --- the form ---
+
+    def _collect(self) -> None:
+        self.notes = self._read(
+            "Any ideas for your campaign? (optional, e.g. 'a dark swamp'; press Enter to skip): ",
+            allow_empty=True,
+        )
+        for key in CHECKLIST_KEYS:
+            value = self._ask_field(key)
+            self.values[key] = value
+            self.print(f"[OK] {CHECKLIST_LABELS[key]}: {value}")
+
+    def _field_options(self, key: str) -> List[str]:
+        self.print(f"\n[System] Writing {CHECKLIST_LABELS[key].lower()} ideas...")
+        return generate_field_options(self.client, key, self.values, self.notes)
+
+    def _ask_field(self, key: str) -> str:
+        label = CHECKLIST_LABELS[key].lower()
+        options = self._field_options(key)
+        while True:
+            self._show(f"Choose the {label}:", options, custom="Type my own")
+            self.print("(or type your own, or ask for different ideas, or ask me to pick one)")
+            rep = self._ask(f"Choose the campaign's {label}", options, custom=True, open_text=True)
+            text = ""
+            if rep.kind == "option":
+                text = options[rep.index]
+            elif rep.kind == "custom":
+                text = valid_field_text(self._read(f"Your {label}: "))
+            elif rep.kind == "text":
+                text = valid_field_text(rep.text)
+            elif rep.kind == "surprise":
+                text = self.rng.choice(options)
+                self.print("[System] Picked one for you.")
+            elif rep.kind == "reject":
+                options = self._field_options(key)
+                continue
+            if text:
+                return text
+            self.print(f"[System] Pick a number, or write at least {MIN_FIELD_WORDS} words of your own.")
 
     # --- build and save ---
 
@@ -596,7 +605,7 @@ class CampaignCreator:
         self.print("\n[1/5] Choosing a style and name suggestions...")
         patron_name = pick_patron_name(self.rng)
         meta = normalize_metadata(
-            self._structured(metadata_messages(self.checklist, patron_name), DerivedMetadata, METADATA_MAX_TOKENS, 0.8)
+            self._structured(metadata_messages(self.values, patron_name), DerivedMetadata, METADATA_MAX_TOKENS, 0.8)
         )
         patron = compose_patron(patron_name, meta.patron_role)
         name = choose_name(meta.suggested_names, self.input, self.print)
@@ -606,23 +615,23 @@ class CampaignCreator:
         self.print("\n[2/5] Writing the storyline...")
         story = normalize_storyline(
             self._structured(
-                storyline_messages(self.checklist, patron), Storyline, STORYLINE_MAX_TOKENS, 0.7
+                storyline_messages(self.values, patron), Storyline, STORYLINE_MAX_TOKENS, 0.7
             ),
-            self.checklist,
+            self.values,
             patron,
         )
 
         self.print("\n[3/5] Designing the world map...")
-        world = build_world(self._structured(map_messages(self.checklist, story), WorldMapDraft, MAP_MAX_TOKENS, 0.5))
+        world = build_world(self._structured(map_messages(self.values, story), WorldMapDraft, MAP_MAX_TOKENS, 0.5))
         if world.used_fallback:
             self.print("[Note] The model's map was unusable, so a simple default map was used.")
 
         info = CampaignInfo(
             name=name,
             slug=slug,
-            setting_description=self.checklist["setting_description"],
-            primary_threat=self.checklist["primary_threat"],
-            starting_quest_hook=self.checklist["starting_quest_hook"],
+            setting_description=self.values["setting_description"],
+            primary_threat=self.values["primary_threat"],
+            starting_quest_hook=self.values["starting_quest_hook"],
             theme_vibe=meta.theme_vibe,
             starting_patron=patron,
             storyline_beginning=story.beginning,
