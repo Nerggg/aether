@@ -281,16 +281,17 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit].rsplit(" ", 1)[0].rstrip(",;:-. ") + "..."
 
 
+def _plain(text) -> str:
+    """Remove angle brackets the model copies from the prompt's <placeholders>."""
+    return " ".join(re.sub(r"[<>]", "", str(text or "")).split())
+
+
 def _clip_tail(text: str, limit: int) -> str:
     """Keep the END of `text` (the newest ideas) when it is longer than `limit`."""
     text = " ".join((text or "").split())
     if len(text) <= limit:
         return text
     return "..." + text[-limit:].split(" ", 1)[-1]
-
-
-def pending(values: Dict[str, str]) -> List[str]:
-    return [k for k in CHECKLIST_KEYS if not values.get(k)]
 
 
 def valid_field_text(text: str) -> str:
@@ -311,7 +312,7 @@ def generate_field_options(
     result: List[str] = []
     seen = set()
     for raw in (response.options if response else []):
-        text = valid_field_text(_clip(str(raw).strip(" \"'-*"), OPTION_MAX_CHARS))
+        text = valid_field_text(_clip(_plain(raw).strip(" \"'-*"), OPTION_MAX_CHARS))
         if text and text.lower() not in seen:
             seen.add(text.lower())
             result.append(text)
@@ -331,7 +332,7 @@ def clean_names(raw: Sequence[str], count: int = NAME_COUNT, exclude: Sequence[s
     names: List[str] = []
 
     def add(candidate, skip_banned: bool) -> None:
-        name = " ".join(str(candidate).split()).strip(" \"'")[:60]
+        name = _plain(candidate).strip(" \"'")[:60]
         low = name.lower()
         if not name or low in {n.lower() for n in names} or (skip_banned and low in banned):
             return
@@ -348,8 +349,8 @@ def clean_names(raw: Sequence[str], count: int = NAME_COUNT, exclude: Sequence[s
 
 def normalize_metadata(resp: Optional[DerivedMetadata]) -> DerivedMetadata:
     """Fill gaps with defaults and make sure there are exactly NAME_COUNT clean names."""
-    vibe = _clip(resp.theme_vibe, 40) if resp else ""
-    role = _clip(resp.patron_role, 60) if resp else ""
+    vibe = _clip(_plain(resp.theme_vibe), 40) if resp else ""
+    role = _clip(_plain(resp.patron_role), 60) if resp else ""
     return DerivedMetadata(
         theme_vibe=vibe or "Heroic Fantasy",
         patron_role=role or DEFAULT_PATRON_ROLE,
@@ -611,8 +612,8 @@ class CampaignCreator:
         self.print("\n=======================================================")
         self.print("          AETHER: CAMPAIGN CREATION TERMINAL")
         self.print("=======================================================")
-        self.print("You will choose a setting, a threat and a quest hook. Answer with a number,")
-        self.print("or type an idea and I will write new options. Type 'cancel' at any time to leave.\n")
+        self.print("You will choose a setting, a threat and a quest hook. Answer with a number.")
+        self.print("Pick 'Type my own idea' to steer the options. Type 'cancel' at any time to leave.\n")
 
     # --- input helpers ---
 

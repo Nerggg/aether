@@ -49,10 +49,6 @@ class JudgeVerdict(BaseModel):
 
 # --- compaction ---------------------------------------------------------------------------------
 
-class NpcNote(BaseModel):
-    name: str
-    notes: str
-
 class MemoryFacts(BaseModel):
     open_threads: List[str] = Field(default_factory=list)
     promises_debts: List[str] = Field(default_factory=list)

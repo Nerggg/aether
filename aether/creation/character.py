@@ -2,15 +2,11 @@
 
 Code owns the four fields (name, race, class, backstory) and renders every menu
 itself, so it always knows which question the player is answering. The model
-only does two small, closed jobs:
+only writes backstory options (with built-in fallbacks if it fails).
 
-* write a few backstory options (with built-in fallbacks if it fails)
-* classify a reply that code could not read (choose / accept / reject /
-  surprise_me / own_text / unclear), validated in code
-
-A reply is read in this order, stopping at the first match:
-a menu number, a closed-list match (race and class), long typed text for open
-fields, and only then the classifier.
+A reply is read as a menu number, then (for race and class) a name from the
+list, then a "named X" shortcut at the name menu. Anything else prints a hint
+and shows the menu again.
 
 Run it on its own:  python -m aether.creation.character <campaign_slug>
 """
@@ -37,7 +33,7 @@ from aether.logic.stats import (
     calculate_character_stats,
 )
 from aether.models import CampaignInfo, Character
-from aether.creation.forms import CUSTOM, REGEN, SURPRISE, Cancelled, Reply, ask_menu, match_closed, parse_number
+from aether.creation.forms import CUSTOM, IDEA, REGEN, SURPRISE, Cancelled, Reply, ask_menu, match_closed, parse_number
 
 CHECKLIST_KEYS = ("name", "race", "char_class", "backstory")
 CHECKLIST_LABELS = {"name": "Name", "race": "Race", "char_class": "Class", "backstory": "Backstory"}
@@ -47,6 +43,8 @@ MAX_NAME_WORDS = 4
 MIN_BACKSTORY_WORDS = 6
 BACKSTORY_MAX_CHARS = 600
 OPTION_MAX_CHARS = 300
+IDEA_MAX_CHARS = 200
+NOTES_MAX_CHARS = 300
 NAME_COUNT = 3
 BACKSTORY_COUNT = 3
 BACKSTORY_MAX_TOKENS = 400
@@ -93,6 +91,14 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rsplit(" ", 1)[0].rstrip(",;:-. ") + "..."
+
+
+def _clip_tail(text: str, limit: int) -> str:
+    """Keep the END of `text` (the newest ideas) when it is longer than `limit`."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:].split(" ", 1)[-1]
 
 
 def clean_name(text: Optional[str]) -> str:
@@ -147,10 +153,6 @@ def starting_items(char_class: str) -> List[Tuple[str, int]]:
     return [*STARTING_KITS.get(char_class, ()), *COMMON_ITEMS]
 
 
-def pending(values: Dict[str, str]) -> List[str]:
-    return [k for k in CHECKLIST_KEYS if not values.get(k)]
-
-
 def suggest_names(rng: random.Random, count: int = NAME_COUNT, exclude: Sequence[str] = ()) -> List[str]:
     names: List[str] = []
     while len(names) < count:
@@ -188,7 +190,7 @@ def backstory_messages(
     )
     lines = [campaign_context(info), f"Character: {name}, a {race} {char_class}"]
     if notes.strip():
-        lines.append(f"Player's ideas: {_clip(notes, 300)}")
+        lines.append(f"Player's ideas: {_clip_tail(notes, NOTES_MAX_CHARS)}")
     return [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(lines)}]
 
 
@@ -279,8 +281,17 @@ class CharacterCreator:
         self.print = print_fn
         self.rng = rng or random.Random()
         self.values: Dict[str, str] = {}
-        self.notes = ""
+        self.ideas: List[str] = []
         self.info: Optional[CampaignInfo] = None
+
+    @property
+    def notes(self) -> str:
+        return "; ".join(self.ideas)
+
+    def _add_idea(self, text: str) -> None:
+        idea = _clip(text, IDEA_MAX_CHARS)
+        if idea:
+            self.ideas.append(idea)
 
     def run(self) -> Optional[int]:
         """Run creation. Returns the new character's id, or None if cancelled or failed."""
@@ -319,8 +330,8 @@ class CharacterCreator:
         self.print("          AETHER: CHARACTER CREATION TERMINAL")
         self.print("=======================================================")
         self.print(f"Campaign: {self.info.name}")
-        self.print("You will choose a name, race, class and backstory. Answer with a number,")
-        self.print("or type what you want. Type 'cancel' at any time to leave.\n")
+        self.print("You will choose a name, race, class and backstory. Answer with a number")
+        self.print("(for race and class you can also type the name). Type 'cancel' at any time to leave.\n")
 
     # --- input helpers ---
 
@@ -339,9 +350,10 @@ class CharacterCreator:
     # --- the form ---
 
     def _collect(self) -> None:
-        self.notes = self._read("Any ideas for your character? (optional, press Enter to skip): ", allow_empty=True)
-        if self.notes:
-            self._prefill(self.notes)
+        first = self._read("Any ideas for your character? (optional, press Enter to skip): ", allow_empty=True)
+        self._add_idea(first)
+        if first:
+            self._prefill(first)
         if "name" not in self.values:
             self._done("name", self._ask_name())
         if "race" not in self.values:
@@ -396,13 +408,22 @@ class CharacterCreator:
 
     def _ask_backstory(self) -> str:
         options = self._backstory_options(BACKSTORY_COUNT)
-        extras = [(CUSTOM, "Write my own"), (REGEN, "New backstories"), (SURPRISE, "Surprise me")]
+        extras = [
+            (CUSTOM, "Write my own"),
+            (REGEN, "New backstories"),
+            (IDEA, "New backstories from my idea"),
+            (SURPRISE, "Surprise me"),
+        ]
         while True:
             rep = ask_menu(self._read, self.print, "Choose a backstory:", options, extras)
             if rep.kind == "option":
                 return options[rep.index]
             if rep.kind == SURPRISE:
                 return self.rng.choice(options)
+            if rep.kind == IDEA:
+                self._add_idea(self._read("Your idea: "))
+                options = self._backstory_options(BACKSTORY_COUNT)
+                continue
             if rep.kind == REGEN:
                 options = self._backstory_options(BACKSTORY_COUNT)
                 continue

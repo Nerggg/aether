@@ -399,18 +399,6 @@ def test_the_notes_reach_the_options_prompt(tmp_path):
     assert "Player's ideas: something spooky" in prompt
 
 
-def test_asking_for_different_ideas_regenerates_the_menu(tmp_path):
-    creator, _ = make_creator(tmp_path, [OPTS_A, js(intent="reject"), OPTS_B], ["", "show me different ones", "1", "cancel"])
-    assert creator.run() is None
-    assert creator.values == {"setting_description": "A sunken coastal city of salt and ruin"}
-
-
-def test_ask_me_to_pick_chooses_one_of_the_options(tmp_path):
-    creator, _ = make_creator(tmp_path, [OPTS_A, js(intent="surprise_me"), OPTS_THREAT], ["", "you pick", "cancel"])
-    assert creator.run() is None
-    assert creator.values["setting_description"] in json.loads(OPTS_A)["options"]
-
-
 def test_garbage_from_the_model_still_creates_a_playable_campaign(tmp_path):
     creator, _ = make_creator(tmp_path, ["garbage"], ["", "1", "1", "1", "1"])
     slug = creator.run()
@@ -433,18 +421,6 @@ def test_old_ideas_are_cut_before_new_ones():
     content = field_options_messages("primary_threat", {}, notes, 3)[1]["content"]
     assert "newest idea" in content and "old idea" not in content
     assert "around the player's ideas" in field_options_messages("primary_threat", {}, "", 3)[0]["content"]
-
-
-def test_typed_text_is_an_idea_that_regenerates_the_options(tmp_path):
-    creator, _ = make_creator(
-        tmp_path, [OPTS_A, js(intent="own_text"), OPTS_B, OPTS_THREAT],
-        ["something spooky", "something with an eagle", "2", "cancel"],
-    )
-    assert creator.run() is None
-    assert creator.ideas == ["something spooky", "something with an eagle"]
-    assert creator.values == {"setting_description": "A haunted pine forest of whispering trees"}
-    regenerated = creator.client._backend.calls[2]["messages"][1]["content"]
-    assert "Player's ideas: something spooky; something with an eagle" in regenerated
 
 
 def test_the_type_my_own_idea_slot_asks_for_an_idea_without_the_classifier(tmp_path):
@@ -511,3 +487,13 @@ def test_type_my_own_idea_adds_an_idea_and_regenerates(tmp_path):
     assert creator.values == {"setting_description": "A haunted pine forest of whispering trees"}
     regenerated = creator.client._backend.calls[1]["messages"][1]["content"]
     assert "Player's ideas: something spooky; something with an eagle" in regenerated
+
+
+def test_placeholder_brackets_are_removed_and_custom_names_work():
+    assert cc.clean_names(["<Cacophonous Overture", "<Harmony of Shadows>", "Plain"]) == [
+        "Cacophonous Overture", "Harmony of Shadows", "Plain"]
+    meta = normalize_metadata(DerivedMetadata(theme_vibe="<Gothic>", patron_role="<a ferry-keeper>"))
+    assert (meta.theme_vibe, meta.patron_role) == ("Gothic", "a ferry-keeper")
+    quiet = lambda *a, **k: None
+    got = choose_name(["One", "Two", "Three"], ask("4", " <My Own> "), quiet, lambda t: [], random.Random(1))
+    assert got == "My Own"

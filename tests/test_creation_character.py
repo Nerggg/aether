@@ -186,7 +186,7 @@ NEW_STORIES = [
 
 def test_notes_prefill_then_a_typed_class_and_surprise_backstory(tmp_path):
     make_campaign(tmp_path)
-    inputs = ["i want to create a human named baron", "i'd go with rogue", "6"]
+    inputs = ["i want to create a human named baron", "i'd go with rogue", "7"]
     creator, out = make_creator(tmp_path, [js(options=STORIES)], inputs)
     assert creator.run() is not None
     assert len(creator.client._backend.calls) == 1               # only the backstory options
@@ -194,6 +194,19 @@ def test_notes_prefill_then_a_typed_class_and_surprise_backstory(tmp_path):
         player = db.get_player()
         assert (player.name, player.race, player.char_class) == ("Baron", "Human", "Rogue")
         assert player.backstory in STORIES
+
+
+def test_new_backstories_from_my_idea_reach_the_prompt(tmp_path):
+    make_campaign(tmp_path)
+    creator, _ = make_creator(
+        tmp_path, [js(options=STORIES), js(options=NEW_STORIES)],
+        ["a salty sea dog", "1", "1", "1", "6", "a tragic sailor", "2"],
+    )
+    assert creator.run() is not None
+    prompt = creator.client._backend.calls[1]["messages"][1]["content"]
+    assert "Player's ideas: a salty sea dog; a tragic sailor" in prompt
+    with GameDB.open("camp", tmp_path) as db:
+        assert db.get_player().backstory == NEW_STORIES[1]
 
 
 def test_typing_your_own_name_and_backstory(tmp_path):
