@@ -5,9 +5,9 @@ order, so it always knows which question the player is answering. For each
 field one structured call writes three options that fit the earlier answers
 and the player's ideas, and code renders them as a numbered menu. Only a
 number fills a field. Anything else the player types is an idea: it is added
-to the notes and the options are written again. A reply is read by
-`character.interpret_reply`: a number first, then the small intent classifier
-for "another" and "you pick".
+to the notes and the options are written again. Code renders every menu slot
+(own idea, new options, surprise me), and anything that is not a number
+shows the menu again.
 
 Everything the model returns is cleaned in code (`generate_field_options`,
 `build_world`, `normalize_*`), because a 3B model often gives bad ids, broken
@@ -36,7 +36,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field, field_validator
 
-from aether.creation.character import Reply, classify_reply, interpret_reply
+from aether.creation.forms import CUSTOM, IDEA, REGEN, SURPRISE, Cancelled, ask_menu
 from aether.creation.names import pick_patron_name
 from aether.db import GameDB, slugify
 from aether.llm import calls
@@ -149,10 +149,6 @@ class LocationDraft(BaseModel):
 
 class WorldMapDraft(BaseModel):
     locations: List[LocationDraft]
-
-
-class _Cancelled(Exception):
-    pass
 
 
 # --- prompts ---------------------------------------------------------------------------------
@@ -512,42 +508,36 @@ def build_world(draft: Optional[WorldMapDraft]) -> World:
 
 def choose_name(
     names: Sequence[str],
-    input_fn: Callable[[str], str],
-    print_fn: Callable[[str], None],
-    regenerate: Optional[Callable[[str], Sequence[str]]] = None,
+    read: Callable[[str], str],
+    say: Callable[..., None],
+    regenerate: Callable[[str], Sequence[str]],
+    rng: random.Random,
 ) -> str:
-    """Let the player pick a suggested name or type their own.
+    """Pick a campaign name from a code-rendered menu.
 
-    With `regenerate`, anything that is not a menu number is an idea: it is passed to
-    `regenerate`, which returns new suggestions, and the menu is shown again. Without
-    it, bad input picks the first name.
+    `regenerate(idea)` returns new suggestions ('' for no idea). Anything that is
+    not a number shows the menu again.
     """
     names = list(names)
+    extras = [
+        (CUSTOM, "Type my own name"),
+        (IDEA, "New names from my idea"),
+        (REGEN, "New names"),
+        (SURPRISE, "Surprise me"),
+    ]
     while True:
-        print_fn("\nSelect a Campaign Name from the suggested options:")
-        for i, name in enumerate(names, start=1):
-            print_fn(f"{i}. {name}")
-        custom = len(names) + 1
-        print_fn(f"{custom}. Input a custom name")
-        prompt = f"\nSelect (1-{custom}) or type an idea for new names: " if regenerate else f"\nSelect (1-{custom}): "
-        raw = input_fn(prompt).strip()
-
-        if raw.isdigit():
-            n = int(raw)
-            if 1 <= n <= len(names):
-                return names[n - 1]
-            if n == custom:
-                typed = input_fn("Enter custom name: ").strip()
-                return typed[:60] if typed else names[0]
-            if regenerate is None:
-                return names[0]
-            print_fn(f"[System] Pick a number from 1 to {custom}, or type an idea for new names.")
+        rep = ask_menu(read, say, "Select a Campaign Name:", names, extras)
+        if rep.kind == "option":
+            return names[rep.index]
+        if rep.kind == SURPRISE:
+            return rng.choice(names)
+        if rep.kind == CUSTOM:
+            typed = _plain(read("Name: "))
+            if typed:
+                return typed[:60]
             continue
-        if regenerate is None:
-            return names[0]
-        if not raw:
-            continue
-        names = list(regenerate(raw)) or names
+        idea = read("Your idea: ") if rep.kind == IDEA else ""
+        names = list(regenerate(idea)) or names
 
 
 def save_campaign(
@@ -611,7 +601,7 @@ class CampaignCreator:
         try:
             self._collect()
             return self._finalize()
-        except (_Cancelled, KeyboardInterrupt, EOFError):
+        except (Cancelled, KeyboardInterrupt, EOFError):
             self.print("\nCampaign creation cancelled.")
         except LLMError as e:
             self.print(f"\n[LLM error] {e}")
@@ -630,22 +620,9 @@ class CampaignCreator:
         while True:
             text = self.input(prompt).strip()
             if text.lower() == "cancel":
-                raise _Cancelled()
+                raise Cancelled()
             if text or allow_empty:
                 return text
-
-    def _show(self, title: str, lines: Sequence[str], custom: Optional[str] = None) -> None:
-        self.print(f"\n{title}")
-        for i, line in enumerate(lines, start=1):
-            self.print(f"  {i}. {line}")
-        if custom:
-            self.print(f"  {len(lines) + 1}. {custom}")
-
-    def _ask(self, question: str, options: Sequence[str], **kw) -> Reply:
-        reply = self._read()
-        return interpret_reply(
-            reply, options, classify=lambda r: classify_reply(self.client, question, options, r), **kw
-        )
 
     # --- the form ---
 
@@ -667,25 +644,17 @@ class CampaignCreator:
     def _ask_field(self, key: str) -> str:
         label = CHECKLIST_LABELS[key].lower()
         options = self._field_options(key)
+        extras = [(CUSTOM, "Type my own idea"), (REGEN, "New options"), (SURPRISE, "Surprise me")]
         while True:
-            self._show(f"Choose the {label}:", options, custom="Type my own idea")
-            self.print("(or type an idea to get new options, or ask me to pick one)")
-            rep = self._ask(f"Choose the campaign's {label}", options, custom=True)
+            rep = ask_menu(self._read, self.print, f"Choose the {label}:", options, extras)
             if rep.kind == "option":
                 return options[rep.index]
-            if rep.kind == "surprise":
+            if rep.kind == SURPRISE:
                 self.print("[System] Picked one for you.")
                 return self.rng.choice(options)
-            if rep.kind == "custom":
+            if rep.kind == CUSTOM:
                 self._add_idea(self._read("Your idea: "))
-                options = self._field_options(key)
-            elif rep.kind == "text":
-                self._add_idea(rep.text)
-                options = self._field_options(key)
-            elif rep.kind == "reject":
-                options = self._field_options(key)
-            else:       # accept or unclear: nothing to act on, show the menu again
-                self.print(f"[System] Pick a number from 1 to {len(options)}, or type an idea for new options.")
+            options = self._field_options(key)
 
     # --- build and save ---
 
@@ -712,12 +681,7 @@ class CampaignCreator:
             shown.extend(fresh)
             return fresh
 
-        name = choose_name(
-            meta.suggested_names,
-            lambda prompt: self._read(prompt, allow_empty=True),
-            self.print,
-            regenerate=more_names,
-        )
+        name = choose_name(meta.suggested_names, self._read, self.print, more_names, self.rng)
         slug = GameDB.unique_slug(name, self.campaigns_dir)
         self.print(f"\nCampaign name: '{name}' (save slot: {slug})")
 

@@ -148,13 +148,34 @@ def ask(*answers):
 
 
 def test_choose_name():
-    names = ["One", "Two", "Three"]
+    shown, seen = ["One", "Two", "Three"], []
     quiet = lambda *a, **k: None
-    assert choose_name(names, ask("2"), quiet) == "Two"
-    assert choose_name(names, ask("4", "My Own"), quiet) == "My Own"
-    assert choose_name(names, ask("4", " "), quiet) == "One"
-    assert choose_name(names, ask("banana"), quiet) == "One"
-    assert choose_name(names, ask("9"), quiet) == "One"
+
+    def more(text):
+        seen.append(text)
+        return ["Four", "Five", "Six"]
+
+    def pick(*answers):
+        return choose_name(shown, ask(*answers), quiet, more, random.Random(1))
+
+    assert pick("2") == "Two"
+    assert pick("4", "My Own") == "My Own"
+    assert pick("4", " ", "1") == "One"                  # an empty custom name shows the menu again
+    assert pick("banana", "9", "3") == "Three"           # words and bad numbers show it again
+    assert pick("5", "salty sea", "2") == "Five" and seen == ["salty sea"]
+    assert pick("6", "1") == "Four" and seen[-1] == ""
+    assert pick("7") in shown
+
+
+def test_typing_an_idea_at_the_name_prompt_writes_new_names(tmp_path):
+    responses = [OPTS_A, OPTS_THREAT, OPTS_HOOK, BUILD[0],
+                 js(suggested_names=["Salt Crown", "Tide Song", "Grey Bell"]),
+                 BUILD[1], BUILD[2], BUILD[3]]
+    creator, out = make_creator(tmp_path, responses, ["", "1", "2", "3", "5", "something with salt", "2"])
+    assert creator.run() == "tide_song"
+    prompt = creator.client._backend.calls[4]["messages"][1]["content"]
+    assert "something with salt" in prompt
+    assert "Do not reuse: The Drowned Bell, Marsh Song, Silent Fog" in prompt
 
 
 # --- saving -----------------------------------------------------------------------------------------
@@ -436,23 +457,14 @@ def test_the_type_my_own_idea_slot_asks_for_an_idea_without_the_classifier(tmp_p
     assert creator.values == {"setting_description": "A sunken coastal city of salt and ruin"}
 
 
-def test_okay_and_hmm_show_the_menu_again_and_are_not_ideas(tmp_path):
+def test_words_instead_of_numbers_show_the_menu_again_and_are_not_ideas(tmp_path):
     creator, out = make_creator(
-        tmp_path, [OPTS_A, js(intent="accept"), js(intent="unclear")], ["", "okay", "hmm", "1", "cancel"],
+        tmp_path, [OPTS_A, OPTS_THREAT], ["", "okay", "give me another one", "1", "cancel"],
     )
     assert creator.run() is None
     assert sum("Choose the setting:" in line for line in out) == 3
-    assert creator.ideas == []
-    assert creator.values["setting_description"] == "A fog-choked marsh kingdom of drowned bells"
-
-
-def test_nothing_typed_ever_becomes_a_field_value(tmp_path):
-    long_text = "a drowned kingdom of salt and bells where the tide never goes out and the dead sing"
-    creator, _ = make_creator(
-        tmp_path, [OPTS_A, js(intent="own_text"), OPTS_B], ["", long_text, "cancel"],
-    )
-    assert creator.run() is None
-    assert creator.values == {} and creator.ideas == [long_text]
+    assert sum("Please pick a number from 1 to 6" in line for line in out) == 2
+    assert creator.ideas == [] and len(creator.client._backend.calls) == 2
 
 
 def test_clean_names():
@@ -470,34 +482,32 @@ def test_names_prompt_carries_ideas_and_names_to_avoid():
     assert "Do not reuse: Marsh Song" in msgs[1]["content"]
 
 
-def test_choose_name_regenerates_for_anything_that_is_not_a_number():
-    seen = []
-
-    def more(text):
-        seen.append(text)
-        return ["Four", "Five", "Six"]
-
-    quiet = lambda *a, **k: None
-    # idea -> new names; empty input and an out-of-range number just re-show the menu
-    assert choose_name(["One", "Two", "Three"], ask("salty sea", "", "9", "2"), quiet, regenerate=more) == "Five"
-    assert seen == ["salty sea"]
-    assert choose_name(["One", "Two", "Three"], ask("4", "My Own"), quiet, regenerate=more) == "My Own"
-    assert choose_name(["One", "Two", "Three"], ask("4", " "), quiet, regenerate=more) == "One"
-
-
-def test_typing_an_idea_at_the_name_prompt_writes_new_names(tmp_path):
-    responses = [OPTS_A, OPTS_THREAT, OPTS_HOOK, BUILD[0],
-                 js(suggested_names=["Salt Crown", "Tide Song", "Grey Bell"]),
-                 BUILD[1], BUILD[2], BUILD[3]]
-    creator, out = make_creator(tmp_path, responses, ["", "1", "2", "3", "something with salt", "2"])
-    assert creator.run() == "tide_song"
-    prompt = creator.client._backend.calls[4]["messages"][1]["content"]
-    assert "something with salt" in prompt
-    assert "Do not reuse: The Drowned Bell, Marsh Song, Silent Fog" in prompt
-
-
 def test_cancel_works_at_the_name_prompt(tmp_path):
     responses = [OPTS_A, OPTS_THREAT, OPTS_HOOK, BUILD[0]]
     creator, out = make_creator(tmp_path, responses, ["", "1", "2", "3", "cancel"])
     assert creator.run() is None
     assert GameDB.list_campaigns(tmp_path) == []
+
+
+def test_new_options_slot_regenerates_the_menu(tmp_path):
+    creator, _ = make_creator(tmp_path, [OPTS_A, OPTS_B], ["", "5", "1", "cancel"])
+    assert creator.run() is None
+    assert creator.values == {"setting_description": "A sunken coastal city of salt and ruin"}
+
+
+def test_surprise_me_chooses_one_of_the_options(tmp_path):
+    creator, _ = make_creator(tmp_path, [OPTS_A, OPTS_THREAT], ["", "6", "cancel"])
+    assert creator.run() is None
+    assert creator.values["setting_description"] in json.loads(OPTS_A)["options"]
+
+
+def test_type_my_own_idea_adds_an_idea_and_regenerates(tmp_path):
+    creator, _ = make_creator(
+        tmp_path, [OPTS_A, OPTS_B, OPTS_THREAT],
+        ["something spooky", "4", "something with an eagle", "2", "cancel"],
+    )
+    assert creator.run() is None
+    assert creator.ideas == ["something spooky", "something with an eagle"]
+    assert creator.values == {"setting_description": "A haunted pine forest of whispering trees"}
+    regenerated = creator.client._backend.calls[1]["messages"][1]["content"]
+    assert "Player's ideas: something spooky; something with an eagle" in regenerated

@@ -17,13 +17,11 @@ Run it on its own:  python -m aether.creation.character <campaign_slug>
 
 from __future__ import annotations
 
-import difflib
 import random
 import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +37,7 @@ from aether.logic.stats import (
     calculate_character_stats,
 )
 from aether.models import CampaignInfo, Character
+from aether.creation.forms import CUSTOM, REGEN, SURPRISE, Cancelled, Reply, ask_menu, match_closed, parse_number
 
 CHECKLIST_KEYS = ("name", "race", "char_class", "backstory")
 CHECKLIST_LABELS = {"name": "Name", "race": "Race", "char_class": "Class", "backstory": "Backstory"}
@@ -48,11 +47,9 @@ MAX_NAME_WORDS = 4
 MIN_BACKSTORY_WORDS = 6
 BACKSTORY_MAX_CHARS = 600
 OPTION_MAX_CHARS = 300
-OWN_TEXT_WORDS = 10          # a reply this long for an open field is the player's own text
 NAME_COUNT = 3
 BACKSTORY_COUNT = 3
 BACKSTORY_MAX_TOKENS = 400
-INTENT_MAX_TOKENS = 60
 
 RACE_ALIASES = {
     "elves": "Elf", "elven": "Elf", "dwarves": "Dwarf", "dwarven": "Dwarf", "gnomish": "Gnome",
@@ -80,31 +77,13 @@ _NAME_PHRASE = re.compile(
     r"\b(?:named|called|name is|name's|names)\s+([A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*){0,3})",
     re.IGNORECASE,
 )
-_NUMBER = re.compile(r"^\s*\(?(\d+)\)?[.)]?\s*$")
 
 
 # --- schemas -----------------------------------------------------------------------------------
 
-class IntentReply(BaseModel):
-    intent: Literal["choose", "accept", "reject", "surprise_me", "own_text", "unclear"] = "unclear"
-    index: Optional[int] = None
-
 
 class BackstoryOptions(BaseModel):
     options: List[str] = Field(default_factory=list)
-
-
-@dataclass
-class Reply:
-    """What a player's reply means. `kind` is one of: option, custom, text, accept,
-    reject, surprise, unclear."""
-    kind: str
-    index: int = -1
-    text: str = ""
-
-
-class _Cancelled(Exception):
-    pass
 
 
 # --- small pure helpers --------------------------------------------------------------------------
@@ -114,36 +93,6 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rsplit(" ", 1)[0].rstrip(",;:-. ") + "..."
-
-
-def parse_number(text: str, count: int) -> Optional[int]:
-    """'2', '2.' or '(2)' as a zero-based index into `count` menu lines, else None."""
-    m = _NUMBER.match(text or "")
-    if not m:
-        return None
-    n = int(m.group(1))
-    return n - 1 if 1 <= n <= count else None
-
-
-def match_closed(text: str, options: Sequence[str], aliases: Optional[Dict[str, str]] = None) -> Optional[str]:
-    """The one option a free-text reply names ('i'd go with paladin', 'elven', 'palladin').
-
-    Exact words and aliases match first; longer words may be one typo away.
-    Returns None when nothing matches or when two different options are named.
-    """
-    lowered = {o.lower(): o for o in options}
-    fuzzy_pool = [o for o in lowered if len(o) >= 5]
-    found = set()
-    for word in re.findall(r"[a-z']+", (text or "").lower()):
-        if word in lowered:
-            found.add(lowered[word])
-        elif aliases and aliases.get(word) in options:
-            found.add(aliases[word])
-        elif len(word) >= 5:
-            close = difflib.get_close_matches(word, fuzzy_pool, n=1, cutoff=0.84)
-            if close and close[0][0] == word[0]:
-                found.add(lowered[close[0]])
-    return next(iter(found)) if len(found) == 1 else None
 
 
 def clean_name(text: Optional[str]) -> str:
@@ -202,10 +151,10 @@ def pending(values: Dict[str, str]) -> List[str]:
     return [k for k in CHECKLIST_KEYS if not values.get(k)]
 
 
-def suggest_names(rng: random.Random, count: int = NAME_COUNT) -> List[str]:
+def suggest_names(rng: random.Random, count: int = NAME_COUNT, exclude: Sequence[str] = ()) -> List[str]:
     names: List[str] = []
     while len(names) < count:
-        names.append(pick_patron_name(rng, exclude=names))
+        names.append(pick_patron_name(rng, exclude=[*names, *exclude]))
     return names
 
 
@@ -221,80 +170,6 @@ def campaign_context(info: CampaignInfo) -> str:
     if info.starting_patron:
         lines.append(f"Starting patron: {info.starting_patron}")
     return "\n".join(lines)
-
-
-def intent_messages(question: str, options: Sequence[str], reply: str) -> Messages:
-    system = "\n".join(
-        [
-            "A player answered a menu on a character-creation screen. Decide what they mean.",
-            "intent is one of:",
-            "- choose: picks one of the numbered options (set index to its number)",
-            "- accept: agrees with or approves what was shown (yes, ok, okay, sure, sounds good)",
-            "- reject: does not want what was shown and asks for something else",
-            "- surprise_me: asks you to pick or invent something for them (random, you choose)",
-            "- own_text: gives their own answer instead of the options",
-            "- unclear: none of the above",
-            "",
-            'Reply as JSON in this shape: {"intent":"<intent>","index":null}',
-        ]
-    )
-    shown = "\n".join(f"{i}. {o}" for i, o in enumerate(options, start=1)) or "(none)"
-    user = f"QUESTION: {question}\nOPTIONS:\n{shown}\nPLAYER REPLY: {reply}"
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
-
-
-def classify_reply(client: LLMClient, question: str, options: Sequence[str], reply: str) -> Tuple[str, Optional[int]]:
-    """(intent, zero-based index or None). A bad or invalid model answer becomes 'unclear'."""
-    parsed = client.structured(
-        "referee", intent_messages(question, options, reply), IntentReply,
-        max_tokens=INTENT_MAX_TOKENS, temperature=0.0,
-    )
-    if parsed is None:
-        return "unclear", None
-    if parsed.intent == "choose":
-        if parsed.index is not None and 1 <= parsed.index <= len(options):
-            return "choose", parsed.index - 1
-        return "unclear", None
-    return parsed.intent, None
-
-
-def interpret_reply(
-    reply: str,
-    options: Sequence[str],
-    *,
-    classify: Callable[[str], Tuple[str, Optional[int]]],
-    custom: bool = False,
-    closed: bool = False,
-    aliases: Optional[Dict[str, str]] = None,
-    open_text: bool = False,
-    shortcut: Optional[Callable[[str], Optional[Reply]]] = None,
-) -> Reply:
-    """Read a reply to a menu. Code first (numbers, closed lists, long text), the classifier last."""
-    n = len(options)
-    idx = parse_number(reply, n + (1 if custom else 0))
-    if idx is not None:
-        return Reply("option", idx) if idx < n else Reply("custom")
-    if shortcut is not None:
-        hit = shortcut(reply)
-        if hit is not None:
-            return hit
-    if closed:
-        match = match_closed(reply, options, aliases)
-        if match:
-            return Reply("option", list(options).index(match))
-    if open_text and len(reply.split()) >= OWN_TEXT_WORDS:
-        return Reply("text", text=reply)
-
-    kind, index = classify(reply)
-    if kind == "choose" and index is not None:
-        return Reply("option", index)
-    if kind == "own_text":
-        return Reply("text", text=reply)
-    if kind == "surprise_me":
-        return Reply("surprise")
-    if kind in ("accept", "reject"):
-        return Reply(kind)
-    return Reply("unclear")
 
 
 def backstory_messages(
@@ -415,7 +290,7 @@ class CharacterCreator:
         try:
             self._collect()
             return self._finalize()
-        except (_Cancelled, KeyboardInterrupt, EOFError):
+        except (Cancelled, KeyboardInterrupt, EOFError):
             self.print("\nCharacter creation cancelled.")
         except LLMError as e:
             self.print(f"\n[LLM error] {e}")
@@ -453,22 +328,9 @@ class CharacterCreator:
         while True:
             text = self.input(prompt).strip()
             if text.lower() == "cancel":
-                raise _Cancelled()
+                raise Cancelled()
             if text or allow_empty:
                 return text
-
-    def _show(self, title: str, lines: Sequence[str], custom: Optional[str] = None) -> None:
-        self.print(f"\n{title}")
-        for i, line in enumerate(lines, start=1):
-            self.print(f"  {i}. {line}")
-        if custom:
-            self.print(f"  {len(lines) + 1}. {custom}")
-
-    def _ask(self, question: str, options: Sequence[str], **kw) -> Reply:
-        reply = self._read()
-        return interpret_reply(
-            reply, options, classify=lambda r: classify_reply(self.client, question, options, r), **kw
-        )
 
     def _done(self, key: str, value: str) -> None:
         self.values[key] = value
@@ -503,87 +365,56 @@ class CharacterCreator:
 
     def _ask_name(self) -> str:
         options = suggest_names(self.rng)
+        extras = [(CUSTOM, "Type my own name"), (REGEN, "New names"), (SURPRISE, "Surprise me")]
         while True:
-            self._show("Choose a name:", options, custom="Type my own name")
-            rep = self._ask(
-                "Choose a name for the character", options, custom=True,
+            rep = ask_menu(
+                self._read, self.print, "Choose a name:", options, extras,
                 shortcut=lambda r: Reply("text", text=r) if name_from_phrase(r) else None,
             )
-            name = ""
             if rep.kind == "option":
-                name = options[rep.index]
-            elif rep.kind == "custom":
-                name = extract_name(self._read("Name: "))
-            elif rep.kind == "text":
-                name = extract_name(rep.text)
-            elif rep.kind == "surprise":
-                name = options[0]
-            elif rep.kind == "reject":
-                options = suggest_names(self.rng)
+                return options[rep.index]
+            if rep.kind == SURPRISE:
+                return self.rng.choice(options)
+            if rep.kind == REGEN:
+                options = suggest_names(self.rng, exclude=options)
                 continue
+            typed = self._read("Name: ") if rep.kind == CUSTOM else rep.text
+            name = extract_name(typed)
             if name:
                 return name
-            self.print("[System] I did not catch a name. Pick a number, or choose 'Type my own name'.")
+            self.print("[System] That does not look like a name. Try again.")
 
     def _ask_closed(
         self, key: str, options: List[str], lines: List[str], aliases: Optional[Dict[str, str]] = None
     ) -> str:
         label = CHECKLIST_LABELS.get(key, key).lower()
+        rep = ask_menu(
+            self._read, self.print, f"Choose your {label}:", options, [(SURPRISE, "Surprise me")],
+            lines=lines, closed=True, aliases=aliases,
+        )
+        return options[rep.index] if rep.kind == "option" else self.rng.choice(options)
+
+    def _ask_backstory(self) -> str:
+        options = self._backstory_options(BACKSTORY_COUNT)
+        extras = [(CUSTOM, "Write my own"), (REGEN, "New backstories"), (SURPRISE, "Surprise me")]
         while True:
-            self._show(f"Choose your {label}:", lines)
-            rep = self._ask(f"Choose the character's {label}", options, closed=True, aliases=aliases)
+            rep = ask_menu(self._read, self.print, "Choose a backstory:", options, extras)
             if rep.kind == "option":
                 return options[rep.index]
-            if rep.kind == "surprise":
-                pick = self.rng.choice(options)
-                self.print(f"[System] Picked {pick} for you.")
-                return pick
-            self.print(f"[System] Pick a number from 1 to {len(options)}, or name a {label} from the list.")
+            if rep.kind == SURPRISE:
+                return self.rng.choice(options)
+            if rep.kind == REGEN:
+                options = self._backstory_options(BACKSTORY_COUNT)
+                continue
+            text = valid_backstory(self._read("Backstory: "))
+            if text:
+                return text
+            self.print(f"[System] Write at least {MIN_BACKSTORY_WORDS} words.")
 
     def _backstory_options(self, count: int) -> List[str]:
         v = self.values
         self.print("\n[System] Writing backstory ideas...")
         return generate_backstories(self.client, self.info, v["name"], v["race"], v["char_class"], self.notes, count)
-
-    def _ask_backstory(self) -> str:
-        options = self._backstory_options(BACKSTORY_COUNT)
-        while True:
-            self._show("Choose a backstory:", options, custom="Write my own")
-            self.print("(or type your own, or ask me to pick one for you)")
-            rep = self._ask("Choose a backstory for the character", options, custom=True, open_text=True)
-            text = ""
-            if rep.kind == "option":
-                text = options[rep.index]
-            elif rep.kind == "custom":
-                text = valid_backstory(self._read("Backstory: "))
-            elif rep.kind == "text":
-                text = valid_backstory(rep.text)
-            elif rep.kind == "surprise":
-                return self._confirm_backstory(self._backstory_options(1)[0])
-            elif rep.kind == "reject":
-                options = self._backstory_options(BACKSTORY_COUNT)
-                continue
-            if text:
-                return text
-            self.print(f"[System] Pick a number, or write at least {MIN_BACKSTORY_WORDS} words of your own.")
-
-    def _confirm_backstory(self, text: str) -> str:
-        options = ["Keep it", "Write another"]
-        while True:
-            self.print(f"\n{text}")
-            self._show("Keep this backstory?", options, custom="Type my own")
-            rep = self._ask("Keep this backstory?", options, custom=True)
-            if rep.kind == "accept" or (rep.kind == "option" and rep.index == 0):
-                return text
-            if rep.kind in ("reject", "surprise") or (rep.kind == "option" and rep.index == 1):
-                text = self._backstory_options(1)[0]
-            elif rep.kind == "custom":
-                own = valid_backstory(self._read("Backstory: "))
-                if own:
-                    return own
-                self.print(f"[System] Write at least {MIN_BACKSTORY_WORDS} words.")
-            else:
-                self.print("[System] Pick 1 to keep it, 2 for another, or 3 to type your own.")
 
     def _finalize(self) -> int:
         c = self.values
