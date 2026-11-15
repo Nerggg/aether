@@ -561,3 +561,11 @@ def test_full_save_and_resume(tmp_path):
     assert resumed.get_state().current_turn == 1
     assert resumed.needs_dm_reply() is False
     resumed.close()
+
+
+def test_reset_drift_clock(db):
+    db.advance_turn()
+    db.advance_turn()
+    db.reset_drift_clock()
+    state = db.get_state()
+    assert (state.turns_since_beat_progress, state.current_turn) == (0, 2)

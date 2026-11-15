@@ -750,6 +750,10 @@ class GameDB:
             )
             return self.get_state().current_turn
 
+    def reset_drift_clock(self) -> None:
+        """The player made real progress toward the objective: restart the drift clock."""
+        self.conn.execute("UPDATE game_state SET turns_since_beat_progress = 0 WHERE id = 1")
+
     def set_pending_options(self, options: Optional[List[Dict[str, Any]]]) -> None:
         """Save the menu currently shown to the player (None clears it)."""
         payload = json.dumps(options) if options is not None else None
