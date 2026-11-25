@@ -424,6 +424,8 @@ class GameEngine:
             situation, self.cfg.gameplay.num_options, db.get_state().current_turn, has_story_beat=beat is not None
         )
         self.print("\n[System] Thinking of options...")
+        recent = db.get_recent_messages(2, include_system=False)
+        last_action = recent[0].content if len(recent) == 2 and recent[0].role == "player" else ""
         result = calls.generate_options(
             self.client,
             narration=narration,
@@ -432,6 +434,7 @@ class GameEngine:
             known_npc_names=all_character_names(db),
             beat=beat,
             check_beat=check,
+            last_action=last_action,
         )
         with db.transaction():
             created = register_new_npcs(db, result.new_npcs, loc.id)

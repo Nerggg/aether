@@ -447,3 +447,8 @@ def test_a_correct_order_is_left_alone():
     assert calls.move_victory_beat_last(beats, "") == beats
     unrelated = [StoryBeat(1, "A", "Do a."), StoryBeat(2, "B", "Do b.")]
     assert calls.move_victory_beat_last(unrelated, "Defeat the witch.") == unrelated
+
+
+def test_stray_made_up_tags_are_removed_from_saved_narration():
+    assert calls.tidy_narration("You wait.\n\n[NAME: Hunger: -1]\n\n[NAME: Focus: -1]") == "You wait."
+    assert calls.tidy_narration("A sign reads [KEEP OUT] here.") == "A sign reads [KEEP OUT] here."

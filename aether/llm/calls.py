@@ -73,6 +73,7 @@ def narrate_stream(client: LLMClient, messages: Messages) -> Iterator[ParseResul
 _BOUNDARY = re.compile(r'[.!?]["\u201d\u2019)]*\s+')
 _LAST_END = re.compile(r'[.!?]["\u201d\u2019)]*(?=\s|$)')
 _ASKS_PLAYER = re.compile(r"\byou(?:r|rs|rself)?\b|\bwhat (?:now|next)\b", re.IGNORECASE)
+_STRAY_TAG = re.compile(r"\s*\[[A-Za-z_ ]{2,20}:[^\[\]\n]{1,40}\]")
 
 
 def tidy_narration(text: str) -> str:
@@ -83,6 +84,7 @@ def tidy_narration(text: str) -> str:
       the menu asks that. Questions inside quotes (NPC speech) are kept.
     """
     text = text.strip()
+    text = _STRAY_TAG.sub("", text).strip()
     if not text:
         return text
     if text[-1] not in '.!?"\u201d\u2019)\u2026*':
@@ -180,6 +182,7 @@ def generate_options(
     known_npc_names: Sequence[str] = (),
     beat: Optional[StoryBeat] = None,
     check_beat: bool = False,
+    last_action: str = "",
 ) -> OptionsResult:
     """The menu for the next turn, plus any new characters and (optionally) beat progress.
 
@@ -190,7 +193,7 @@ def generate_options(
     limit = len(categories)
     max_words = client.config.gameplay.max_option_words
     messages = prompts.options_messages(
-        narration, categories, state_block, max_words, known_npc_names, beat, check_beat
+        narration, categories, state_block, max_words, known_npc_names, beat, check_beat, last_action
     )
     response = client.structured("options", messages, OptionsResponse, max_tokens=OPTIONS_MAX_TOKENS)
 

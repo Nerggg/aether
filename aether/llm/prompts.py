@@ -68,14 +68,15 @@ def dm_system_prompt(campaign: Optional[CampaignInfo] = None) -> str:
         "who are present or have already been met.",
         "- Stay consistent with the character sheet, location and story so far. "
         "Do not give the player items they do not have.",
-        "- A bracketed note such as [Stealth check ...: Success] is a dice result. "
-        "Narrate that outcome. Never mention dice, DCs or brackets in the story.",
+        "- A bracketed note such as [Result of the player's stealth attempt: FAILURE] is the outcome "
+        "of the player's action. Narrate that outcome as part of the story. Never mention dice, "
+        "checks, DCs, numbers or brackets.",
         "",
         "STATE TAGS",
-        "Most replies need none. Only when it truly happens in your narration, add tags at the "
-        "very end, one per line, written as [NAME: value]. The names are ADD_ITEM (an item name), "
-        "REMOVE_ITEM (an item name), TAKE_DAMAGE (a whole number) and HEAL_HP (a whole number). "
-        "Never write a tag with an empty or placeholder value.",
+        "Most replies need none. Only if it truly happens in your narration, add a tag on its own line "
+        "at the very end. The only tags that exist are [ADD_ITEM: Rope], [REMOVE_ITEM: Rope], "
+        "[TAKE_DAMAGE: 3] and [HEAL_HP: 2] (these show the format only). Never invent other tags: "
+        "hunger, mood and focus are not tracked.",
     ]
     return "\n".join(lines)
 
@@ -255,6 +256,7 @@ def options_messages(
     known_npc_names: Sequence[str] = (),
     beat: Optional[StoryBeat] = None,
     check_beat: bool = False,
+    last_action: str = "",
 ) -> Messages:
     """Ask for one short action per category, plus any new named characters.
 
@@ -287,12 +289,16 @@ def options_messages(
         lines.append(
             f"- beat_achieved: true only if the scene shows the player has already fully achieved: {beat.objective}"
         )
+    if last_action:
+        lines.append("- Do not offer the action the player just did again, or a near copy of it.")
     lines += [
         "",
         'Reply as JSON, for example: {"options":[{"category":"story","text":"Examine the runes","skill":"investigation"},'
         '{"category":"cautious","text":"Back away slowly","skill":null}],"new_npcs":[],"beat_achieved":false}',
     ]
     user = f"STATE:\n{state_block}\n\nSCENE:\n{narration.strip()}"
+    if last_action:
+        user += f"\n\nPLAYER JUST DID:\n{last_action.strip()}"
     return [{"role": "system", "content": "\n".join(lines)}, {"role": "user", "content": user}]
 
 

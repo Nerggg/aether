@@ -76,7 +76,6 @@ DEFAULT_SKILLS: Dict[str, str] = {
     "cautious": "perception",
     "bold": "athletics",
     "investigative": "investigation",
-    "resourceful": "survival",
 }
 
 

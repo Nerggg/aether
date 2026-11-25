@@ -230,3 +230,9 @@ def test_memory_facts_prompt():
 
 def test_beats_prompt_calls_the_hero_the_player():
     assert 'never by a name' in prompts.beats_messages(CAMPAIGN, [FERRY, CAUSEWAY], 4, 6)[0]["content"]
+
+
+def test_options_prompt_names_the_last_action_and_forbids_repeating_it():
+    msgs = prompts.options_messages("s", ["story"], "x", 8, last_action="Ration the bread")
+    assert "PLAYER JUST DID:\nRation the bread" in msgs[1]["content"]
+    assert "Do not offer the action the player just did" in msgs[0]["content"]

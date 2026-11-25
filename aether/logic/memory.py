@@ -10,6 +10,7 @@ so the four storage stages from the design discussion collapse into one rule.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
@@ -127,6 +128,17 @@ def group_exchanges(messages: Sequence[Message]) -> List[List[Message]]:
 _ROLE_MAP = {"player": "user", "dm": "assistant"}
 
 
+_ROLL_NOTE = re.compile(r"^(?P<skill>.+?) check \([A-Z]{3}\): d20 .* - (?P<result>Success|Failure)$")
+
+
+def _note_for_model(content: str) -> str:
+    """Show the model only the outcome of a roll, never the numbers or the DC."""
+    m = _ROLL_NOTE.match(content.strip())
+    if m:
+        return f"Result of the player's {m['skill'].lower()} attempt: {m['result'].upper()}"
+    return content
+
+
 def build_history_messages(messages: Sequence[Message]) -> List[Dict[str, str]]:
     """Convert transcript rows to chat messages.
 
@@ -137,7 +149,7 @@ def build_history_messages(messages: Sequence[Message]) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for m in messages:
         if m.role == "system":
-            note = f"[{m.content}]"
+            note = f"[{_note_for_model(m.content)}]"
             if out and out[-1]["role"] == "user":
                 out[-1]["content"] += "\n" + note
             else:

@@ -230,7 +230,16 @@ def test_assemble_with_summary_but_no_tail_has_no_marker():
     assert CONTINUES_MARKER not in chat[0]["content"]
     assert len(chat) == 1
 
+
 def test_group_exchanges():
     groups = group_exchanges(msgs(["dm", "player", "system", "dm", "player", "dm"]))
     assert [[m.role for m in g] for g in groups] == [["dm"], ["player", "system", "dm"], ["player", "dm"]]
     assert group_exchanges([]) == []
+
+
+def test_the_model_sees_roll_outcomes_but_not_numbers():
+    messages = msgs(["player", "system", "dm"],
+                    ["I forage.", "Survival check (WIS): d20 10 + 0 = 10 vs DC 13 - Failure", "Nothing."])
+    chat = build_history_messages(messages)
+    assert chat[0]["content"] == "I forage.\n[Result of the player's survival attempt: FAILURE]"
+    assert "DC" not in chat[0]["content"]
