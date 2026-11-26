@@ -60,23 +60,24 @@ class ActionOption:
 
 FALLBACK_OPTIONS.update({
     STORY: ActionOption("Press on toward your goal", None, STORY),
-    "cautious": ActionOption("Proceed carefully", "perception", "cautious"),
+    "cautious": ActionOption("Proceed carefully", None, "cautious"),
     "bold": ActionOption("Act boldly", "athletics", "bold"),
-    "investigative": ActionOption("Look around closely", "investigation", "investigative"),
-    "resourceful": ActionOption("Try something clever", "survival", "resourceful"),
-    "friendly": ActionOption("Speak kindly", "persuasion", "friendly"),
-    "probing": ActionOption("Ask probing questions", "insight", "probing"),
+    "investigative": ActionOption("Look around closely", None, "investigative"),
+    "resourceful": ActionOption("Try something clever", None, "resourceful"),
+    "friendly": ActionOption("Speak kindly", None, "friendly"),
+    "probing": ActionOption("Ask probing questions", None, "probing"),
     "firm": ActionOption("Press for answers", None, "firm"),
     "leave": ActionOption("Walk away", None, "leave"),
 })
 
-# Skill to roll when the model leaves one out. Story, leave, friendly, probing
-# and firm stay roll-free: an ordinary conversation line should not risk a failure.
-DEFAULT_SKILLS: Dict[str, str] = {
-    "cautious": "perception",
-    "bold": "athletics",
-    "investigative": "investigation",
-}
+
+# Only these categories ever roll a die (a typed action rolls only if the judge calls it
+# risky). Careful, investigative, resourceful and conversation options never fail, so a
+# trivial action cannot produce a failure for the narrator to invent consequences for.
+ROLLING_CATEGORIES = frozenset({"bold"})
+
+# Skill to roll when the model leaves one out (or names an unknown one).
+DEFAULT_SKILLS: Dict[str, str] = {"bold": "athletics"}
 
 
 def apply_default_skills(options: Sequence[ActionOption]) -> List[ActionOption]:
@@ -85,6 +86,71 @@ def apply_default_skills(options: Sequence[ActionOption]) -> List[ActionOption]:
         if option.skill is None and option.category in DEFAULT_SKILLS:
             option.skill = DEFAULT_SKILLS[option.category]
     return list(options)
+
+
+def restrict_rolls(options: Sequence[ActionOption]) -> List[ActionOption]:
+    """Drop the skill from every option whose category is not allowed to roll."""
+    for option in options:
+        if option.category not in ROLLING_CATEGORIES:
+            option.skill = None
+    return list(options)
+
+
+def rolled_skill(option: ActionOption) -> Optional[str]:
+    """The skill to roll for a menu option, or None. Also protects menus saved by older versions."""
+    return option.skill if option.category in ROLLING_CATEGORIES else None
+
+
+# --- options the player cannot or should not be offered ---------------------------------
+
+# Classes that cannot cast spells. Casters are left alone, so the table stays small.
+NON_CASTERS = frozenset({"fighter", "rogue"})
+
+_SPELLWORDS = re.compile(
+    r"\b(?:cast|casts|casting|spell|spells|spellcasting|incantation|incantations|conjure|"
+    r"conjures|fireball|cantrip|cantrips|enchant|enchants|enchantment)\b",
+    re.IGNORECASE,
+)
+
+REPEAT_THRESHOLD = 0.6
+
+
+def _fallback_for(category: Optional[str]) -> "ActionOption":
+    """A fresh copy of the built-in option for `category` (the story one if it is unknown)."""
+    fb = FALLBACK_OPTIONS.get(category or "", FALLBACK_OPTIONS[STORY])
+    return ActionOption(fb.text, fb.skill, category or fb.category)
+
+
+def is_spell_option(text: str) -> bool:
+    return bool(_SPELLWORDS.search(text or ""))
+
+
+def filter_unusable_options(
+    options: Sequence[ActionOption], char_class: Optional[str]
+) -> List[ActionOption]:
+    """Swap in the slot's fallback for any option that casts a spell the class cannot cast."""
+    if not char_class or char_class.strip().lower() not in NON_CASTERS:
+        return list(options)
+    return [_fallback_for(o.category) if is_spell_option(o.text) else o for o in options]
+
+
+def avoid_repeating(options: Sequence[ActionOption], last_action: str) -> List[ActionOption]:
+    """Swap in the slot's fallback for any option that repeats what the player just did.
+
+    If the fallback would repeat it too, the original option is kept: a repeat is
+    better than a menu with the same blunt line every turn.
+    """
+    if not last_action or not last_action.strip():
+        return list(options)
+    result: List[ActionOption] = []
+    for option in options:
+        if _too_similar(option.text, last_action, REPEAT_THRESHOLD):
+            fb = _fallback_for(option.category)
+            if not _too_similar(fb.text, last_action, REPEAT_THRESHOLD):
+                result.append(fb)
+                continue
+        result.append(option)
+    return result
 
 
 def detect_situation(npc_names_present: Iterable[str], last_narration: str) -> str:

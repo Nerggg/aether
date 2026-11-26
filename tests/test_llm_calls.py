@@ -69,7 +69,7 @@ def test_generate_options_cleans_and_assigns_categories():
     client, backend = client_with(reply)
     r = calls.generate_options(client, narration="n", categories=CATS, state_block="s", beat=BEAT)
     assert [o.text for o in r.options] == ["Search for the bell's source", "Move quietly down the path", "Charge into the fog"]
-    assert [o.skill for o in r.options] == ["investigation", "stealth", "athletics"]
+    assert [o.skill for o in r.options] == [None, None, "athletics"]   # only bold rolls
     assert [o.category for o in r.options] == CATS
     assert r.ok and not r.beat_achieved and r.new_npcs == []
     assert backend.calls[0]["options"]["num_predict"] == calls.OPTIONS_MAX_TOKENS
@@ -91,6 +91,31 @@ def test_generate_options_trims_a_long_menu_and_duplicates():
     r = calls.generate_options(client, narration="n", categories=CATS, state_block="s")
     assert len(r.options) == 3
     assert len({o.text for o in r.options}) == 3
+
+
+def test_generate_options_replaces_spells_for_a_rogue_but_not_a_wizard():
+    reply = js(options=[
+        {"text": "Examine the runes"}, {"text": "Cast a detection spell"}, {"text": "Charge into the fog"},
+    ])
+    client, _ = client_with(reply)
+    rogue = calls.generate_options(client, narration="n", categories=CATS, state_block="s", char_class="Rogue")
+    assert [o.text for o in rogue.options] == ["Examine the runes", "Proceed carefully", "Charge into the fog"]
+    client, _ = client_with(reply)
+    wizard = calls.generate_options(client, narration="n", categories=CATS, state_block="s", char_class="Wizard")
+    assert wizard.options[1].text == "Cast a detection spell"
+    client, _ = client_with(reply)
+    unknown = calls.generate_options(client, narration="n", categories=CATS, state_block="s")
+    assert unknown.options[1].text == "Cast a detection spell"
+
+
+def test_generate_options_replaces_a_repeat_of_the_last_action():
+    reply = js(options=[
+        {"text": "Examine the runes"}, {"text": "Ration the stale bread"}, {"text": "Charge into the fog"},
+    ])
+    client, _ = client_with(reply)
+    r = calls.generate_options(client, narration="n", categories=CATS, state_block="s",
+                               last_action="Ration the stale bread for later")
+    assert [o.text for o in r.options] == ["Examine the runes", "Proceed carefully", "Charge into the fog"]
 
 
 def test_generate_options_model_failure_gives_fallback_menu():

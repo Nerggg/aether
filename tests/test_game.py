@@ -125,7 +125,7 @@ def test_new_game_opens_plays_one_turn_and_saves_everything(tmp_path):
         ["The fog thickens around you. [TAKE_DAMAGE: 2]"],        # narration for the chosen action
         OPT,
     ]
-    engine, out = make_engine(tmp_path, responses, ["1", "exit"])
+    engine, out = make_engine(tmp_path, responses, ["3", "exit"])   # 3 = the bold option, the only kind that rolls
     assert engine.run() is True
     assert len(engine.client._backend.calls) == 5
     with GameDB.open("camp", tmp_path) as db:
@@ -208,3 +208,13 @@ def test_a_campaign_without_a_character_is_refused(tmp_path):
     engine, out = make_engine(tmp_path, ["x"], [])
     assert engine.run() is False
     assert any("no character" in line for line in out)
+
+
+def test_only_bold_menu_options_roll_dice(tmp_path):
+    make_game(tmp_path)
+    responses = ["A landing.", ["You stand on the pier."], OPT, ["Nothing stirs."], OPT]
+    engine, out = make_engine(tmp_path, responses, ["1", "exit"])   # 1 = story, skill "investigation"
+    engine.run()
+    assert not any("[Roll]" in line for line in out)
+    with GameDB.open("camp", tmp_path) as db:
+        assert [m.role for m in db.get_recent_messages(10)] == ["dm", "player", "dm"]

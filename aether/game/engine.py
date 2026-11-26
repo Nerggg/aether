@@ -39,6 +39,7 @@ from aether.logic.options import (
     detect_situation,
     format_menu,
     parse_choice,
+    rolled_skill,
     select_categories,
 )
 from aether.logic.stats import ABILITIES, format_roll, roll_check
@@ -244,7 +245,7 @@ class GameEngine:
             return None
         if choice.kind == "option":
             o = options[choice.index]
-            return Action(o.text, o.skill, difficulty_for(o.category))
+            return Action(o.text, rolled_skill(o), difficulty_for(o.category))
         return self._custom_action()
 
     def _custom_action(self) -> Optional[Action]:
@@ -435,6 +436,7 @@ class GameEngine:
             beat=beat,
             check_beat=check,
             last_action=last_action,
+            char_class=player.char_class,
         )
         with db.transaction():
             created = register_new_npcs(db, result.new_npcs, loc.id)

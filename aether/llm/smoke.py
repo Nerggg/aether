@@ -47,7 +47,7 @@ PLAYER = Character(
     dexterity=17, wisdom=14, hp=11, max_hp=11,
     backstory="A former scout of the Lantern Guard who lost her squad to the marsh fog and has never forgiven herself.",
 )
-INVENTORY = [("Short bow", 1), ("Arrows", 12), ("Stale bread", 1)]
+INVENTORY = [("Short bow", 1), ("Arrows", 12), ("Leather armor", 1)]
 BEAT = StoryBeat(1, "Learn of the Bell", "Discover where the drowned bell is ringing from.")
 MOTHER_HESK = Character(name="Mother Hesk", type="ally", location_id="mirewick_ferry", id=2)
 

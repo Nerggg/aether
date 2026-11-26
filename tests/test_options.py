@@ -16,6 +16,12 @@ from aether.logic.options import (
     sanitize_options,
     select_categories,
     apply_default_skills,
+    ROLLING_CATEGORIES,
+    avoid_repeating,
+    filter_unusable_options,
+    is_spell_option,
+    restrict_rolls,
+    rolled_skill,
 )
 
 
@@ -208,9 +214,88 @@ def test_clean_does_not_leave_a_dangling_end():
 def test_default_skills_fill_gaps_only():
     opts = [ActionOption("Sneak", None, "cautious"), ActionOption("Hide", "stealth", "cautious"),
             ActionOption("Ask", None, "probing"), ActionOption("Go", None, "story")]
-    assert [o.skill for o in apply_default_skills(opts)] == ["perception", "stealth", None, None]
+    # only bold has a default skill now; a skill the model gave is left for restrict_rolls to judge
+    assert [o.skill for o in apply_default_skills(opts)] == [None, "stealth", None, None]
+    bold = [ActionOption("Charge", None, "bold")]
+    assert apply_default_skills(bold)[0].skill == "athletics"
 
 def test_firm_replaces_confrontational_and_never_rolls_by_default():
     assert "firm" in CATEGORY_POOLS[CONVERSATION]
     assert "confrontational" not in CATEGORY_POOLS[CONVERSATION]
     assert apply_default_skills([ActionOption("Demand answers", None, "firm")])[0].skill is None
+
+
+def test_only_bold_keeps_a_skill():
+    opts = [ActionOption("Search", "investigation", "investigative"), ActionOption("Sneak", "stealth", "cautious"),
+            ActionOption("Make a snack", "survival", "resourceful"), ActionOption("Charge", "athletics", "bold"),
+            ActionOption("Go on", "perception", "story"), ActionOption("Chat", "persuasion", "friendly")]
+    assert [o.skill for o in restrict_rolls(opts)] == [None, None, None, "athletics", None, None]
+    assert ROLLING_CATEGORIES == {"bold"}
+
+
+def test_rolled_skill_ignores_skills_on_menus_saved_by_older_versions():
+    assert rolled_skill(ActionOption("Sneak", "stealth", "cautious")) is None
+    assert rolled_skill(ActionOption("Charge", "athletics", "bold")) == "athletics"
+    assert rolled_skill(ActionOption("Charge", None, "bold")) is None
+
+
+def test_fallbacks_roll_only_when_bold():
+    for category, opt in FALLBACK_OPTIONS.items():
+        assert (opt.skill is not None) == (category in ROLLING_CATEGORIES)
+
+
+# --- spells for classes that cannot cast -----------------------------------------------
+
+@pytest.mark.parametrize("text", ["Cast a detection spell", "Conjure a flame", "Chant the incantation",
+                                  "Hurl a fireball", "Enchant the door"])
+def test_spell_words_are_detected(text):
+    assert is_spell_option(text)
+
+
+@pytest.mark.parametrize("text", ["Search the castle wall", "Pick the lock",
+                                  "Examine the runes", "Sneak past the guard"])
+def test_ordinary_actions_are_not_spells(text):
+    assert not is_spell_option(text)
+
+
+def test_rogue_and_fighter_lose_spell_options_but_casters_keep_them():
+    opts = [ActionOption("Examine the runes", None, "investigative"),
+            ActionOption("Cast a detection spell", None, "resourceful")]
+    for cls in ("Rogue", "fighter", " Fighter "):
+        out = filter_unusable_options(opts, cls)
+        assert out[0].text == "Examine the runes"
+        assert out[1] == ActionOption("Try something clever", None, "resourceful")
+    for cls in ("Wizard", "Cleric", "Bard", "Paladin", "Ranger", None, "", "Warlock"):
+        assert filter_unusable_options(opts, cls)[1].text == "Cast a detection spell"
+
+
+def test_filter_does_not_touch_the_original_options_or_fallback_table():
+    opts = [ActionOption("Cast a spell", None, "bold")]
+    out = filter_unusable_options(opts, "Rogue")
+    out[0].text = "changed"
+    assert opts[0].text == "Cast a spell" and FALLBACK_OPTIONS["bold"].text == "Act boldly"
+
+
+def test_unknown_category_falls_back_to_the_story_option():
+    out = filter_unusable_options([ActionOption("Cast a spell", None, None)], "Rogue")
+    assert out[0].text == FALLBACK_OPTIONS[STORY].text
+
+
+# --- not repeating the player's last action -------------------------------------------
+
+def test_options_that_repeat_the_last_action_are_replaced():
+    opts = [ActionOption("Ration the stale bread", "survival", "resourceful"),
+            ActionOption("Examine the runes", None, "investigative")]
+    out = avoid_repeating(opts, "Ration the stale bread for later")
+    assert out[0] == ActionOption("Try something clever", None, "resourceful")
+    assert out[1].text == "Examine the runes"
+
+
+def test_exact_menu_text_counts_as_a_repeat():
+    out = avoid_repeating([ActionOption("Act boldly", "athletics", "bold")], "Act boldly")
+    assert out[0].text == "Act boldly"        # the fallback repeats too, so the original is kept
+
+
+def test_no_last_action_changes_nothing():
+    opts = [ActionOption("Examine the runes", None, "investigative")]
+    assert avoid_repeating(opts, "") == opts and avoid_repeating(opts, "   ") == opts

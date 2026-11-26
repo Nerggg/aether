@@ -29,7 +29,15 @@ from aether.llm.schemas import (
     OptionsResponse,
 )
 from aether.logic.memory import group_exchanges, summary_to_text
-from aether.logic.options import ActionOption, apply_default_skills, complete_options, sanitize_options
+from aether.logic.options import (
+    ActionOption,
+    apply_default_skills,
+    avoid_repeating,
+    complete_options,
+    filter_unusable_options,
+    restrict_rolls,
+    sanitize_options,
+)
 from aether.logic.stats import normalize_skill
 from aether.logic.story import is_valid_condition
 from aether.logic.tags import ParseResult, Tag, TagParser
@@ -183,6 +191,7 @@ def generate_options(
     beat: Optional[StoryBeat] = None,
     check_beat: bool = False,
     last_action: str = "",
+    char_class: Optional[str] = None,
 ) -> OptionsResult:
     """The menu for the next turn, plus any new characters and (optionally) beat progress.
 
@@ -205,7 +214,10 @@ def generate_options(
         cat = (o.category or "").strip().lower()
         raw.append({"text": o.text, "skill": o.skill, "category": cat if cat in categories else None})
     cleaned = sanitize_options(raw, max_words, limit, categories)
-    options = apply_default_skills(complete_options(cleaned, categories, limit))
+    options = complete_options(cleaned, categories, limit)
+    options = filter_unusable_options(options, char_class)
+    options = avoid_repeating(options, last_action)
+    options = restrict_rolls(apply_default_skills(options))
     order = {c: i for i, c in enumerate(categories)}
     options.sort(key=lambda o: order.get(o.category, len(order)))
 

@@ -56,7 +56,7 @@ RACE_ALIASES = {
 
 # Name, quantity. Everyone also gets COMMON_ITEMS.
 STARTING_KITS: Dict[str, Tuple[Tuple[str, int], ...]] = {
-    "Fighter": (("Longsword", 1), ("Chain mail", 1)),
+    "Fighter": (("Longsword", 1), ("Chain mail", 1), ("Shield", 1)),
     "Rogue": (("Dagger", 1), ("Leather armor", 1), ("Thieves' tools", 1)),
     "Wizard": (("Quarterstaff", 1), ("Spellbook", 1), ("Robes", 1)),
     "Cleric": (("Mace", 1), ("Scale mail", 1), ("Holy symbol", 1)),
@@ -64,7 +64,7 @@ STARTING_KITS: Dict[str, Tuple[Tuple[str, int], ...]] = {
     "Ranger": (("Short bow", 1), ("Arrows", 12), ("Leather armor", 1)),
     "Bard": (("Rapier", 1), ("Lute", 1), ("Leather armor", 1)),
 }
-COMMON_ITEMS: Tuple[Tuple[str, int], ...] = (("Stale bread", 1),)
+COMMON_ITEMS: Tuple[Tuple[str, int], ...] = ()
 
 _BAD_NAMES = frozenset({"none", "null", "unknown", "n/a", "na", "player", "character", "name", "unnamed"})
 _RESERVED = frozenset(
